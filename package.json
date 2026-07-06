@@ -1,0 +1,21 @@
+{
+  "name": "ai-infraops",
+  "version": "0.1.0",
+  "private": true,
+  "description": "统一 AI 基础设施运维平台。",
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:admin": "npm --workspace @ai-infraops/admin-web run dev",
+    "build:admin": "npm --workspace @ai-infraops/admin-web run build",
+    "lint:admin": "npm --workspace @ai-infraops/admin-web run lint",
+    "dev:backend-admin": "npm --workspace @ai-infraops/backend-admin-web run dev",
+    "build:backend-admin": "npm --workspace @ai-infraops/backend-admin-web run build",
+    "lint:backend-admin": "npm --workspace @ai-infraops/backend-admin-web run lint",
+    "dev:rbac-api": "cd services/backend && micromamba run -n base python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload",
+    "init:mysql": "cd services/backend && micromamba run -n base python scripts/init_mysql.py"
+  }
+}
