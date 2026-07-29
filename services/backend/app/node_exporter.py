@@ -46,6 +46,15 @@ def scrape_node_exporter(raw_url: str, include_cpu_usage: bool = False) -> Scrap
     public_ip = public_ip_from_url(url)
     try:
         content = fetch_metrics(url)
+        if not has_node_exporter_metrics(content):
+            return ScrapeResult(
+                status="unreachable",
+                normalized_url=url,
+                hostname="",
+                public_ip=public_ip,
+                error="metrics 内容不是 node-exporter：缺少主机 CPU、内存、磁盘等 node_* 指标",
+                metrics=None,
+            )
         cpu_usage = None
         sample_seconds = 0.0
         if include_cpu_usage:
@@ -53,6 +62,15 @@ def scrape_node_exporter(raw_url: str, include_cpu_usage: bool = False) -> Scrap
             start = time.monotonic()
             time.sleep(CPU_USAGE_SAMPLE_SECONDS)
             content = fetch_metrics(url)
+            if not has_node_exporter_metrics(content):
+                return ScrapeResult(
+                    status="unreachable",
+                    normalized_url=url,
+                    hostname="",
+                    public_ip=public_ip,
+                    error="metrics 内容不是 node-exporter：缺少主机 CPU、内存、磁盘等 node_* 指标",
+                    metrics=None,
+                )
             sample_seconds = time.monotonic() - start
             second_cpu_seconds = collect_cpu_mode_seconds(content)
             cpu_usage = calculate_cpu_usage_percent(first_cpu_seconds, second_cpu_seconds)
@@ -83,6 +101,15 @@ def scrape_node_exporter(raw_url: str, include_cpu_usage: bool = False) -> Scrap
 def fetch_metrics(url: str) -> str:
     with urlopen(url, timeout=METRICS_TIMEOUT_SECONDS) as response:
         return response.read().decode("utf-8", errors="replace")
+
+
+def has_node_exporter_metrics(content: str) -> bool:
+    required_metric_names = (
+        "node_cpu_seconds_total",
+        "node_memory_MemTotal_bytes",
+        "node_filesystem_size_bytes",
+    )
+    return any(metric_name in content for metric_name in required_metric_names)
 
 
 def parse_metrics(content: str) -> dict:

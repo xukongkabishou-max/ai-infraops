@@ -329,7 +329,11 @@ def update_host_scrape(host_id: int, scrape) -> None:
                     last_error = %s,
                     last_seen_at = IF(%s = 'active', NOW(), last_seen_at),
                     public_ip = IF(public_ip = '', %s, public_ip),
-                    hostname = IF(hostname = '' AND %s <> '', %s, hostname)
+                    hostname = IF(
+                        %s <> '' AND (hostname = '' OR hostname = public_ip),
+                        %s,
+                        hostname
+                    )
                 WHERE id = %s
                 """,
                 (
