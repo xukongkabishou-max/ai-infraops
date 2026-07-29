@@ -26,13 +26,15 @@ def split_sql(sql_text: str) -> list[str]:
 
 def main() -> None:
     sql_path = ROOT_DIR / "services" / "backend" / "sql" / "init.sql"
-    sql_text = sql_path.read_text(encoding="utf-8")
+    migration_dir = ROOT_DIR / "services" / "backend" / "sql"
+    sql_paths = [sql_path, *sorted(migration_dir.glob("[0-9][0-9][0-9]_*.sql"))]
 
     connection = get_connection(database=None)
     try:
         with connection.cursor() as cursor:
-            for statement in split_sql(sql_text):
-                cursor.execute(statement)
+            for current_path in sql_paths:
+                for statement in split_sql(current_path.read_text(encoding="utf-8")):
+                    cursor.execute(statement)
         connection.commit()
     finally:
         connection.close()

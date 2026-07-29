@@ -12,6 +12,25 @@ type MachinePageKey = "environmentApis" | "machineAccounts" | "middlewareAccount
 type BusinessPageKey = "nodePorts" | "imageTags" | "gpuModels" | "envKeys";
 type MiddlewarePageKey = "nacosKeys" | "healthChecks";
 
+type K8sHostOption = {
+  host_id: number;
+  environment_id: number;
+  environment_name: string;
+  hostname: string;
+  cluster_id: number;
+  status: "configured" | "active" | "unreachable" | "disabled";
+  last_error?: string | null;
+};
+
+type ControllerImage = {
+  controller_type: "Deployment" | "StatefulSet" | "DaemonSet";
+  controller_name: string;
+  pod_name: string;
+  ready_replicas: number;
+  desired_replicas: number;
+  containers: Array<{ name: string; image: string }>;
+};
+
 const navigationItems: Array<{
   key: SectionKey;
   label: string;
@@ -126,13 +145,6 @@ const nodePortRows = [
   { env: "生产 CPU 环境", namespace: "backend", service: "api-gateway", nodePort: "30080", protocol: "HTTP" },
 ];
 
-const imageRows = [
-  { env: "开发 GPU 环境", workload: "model-gateway", image: "registry.example.local/ai/model-gateway:v0.8.2" },
-  { env: "开发 GPU 环境", workload: "embedding-worker", image: "registry.example.local/ai/embedding-worker:v1.4.1" },
-  { env: "测试 GPU 环境", workload: "rag-api", image: "registry.example.local/ai/rag-api:v0.12.0" },
-  { env: "生产 CPU 环境", workload: "ops-api", image: "registry.example.local/infra/ops-api:v0.3.7" },
-];
-
 const gpuModelRows = [
   { env: "开发 GPU 环境", model: "Qwen-72B-Instruct", gpu: "GPU-0, GPU-1", memory: "68 GiB / 96 GiB", freeCard: "GPU-2" },
   { env: "测试 GPU 环境", model: "Embedding-BGE", gpu: "GPU-3", memory: "18 GiB / 48 GiB", freeCard: "GPU-0, GPU-1" },
@@ -181,14 +193,12 @@ export default function Home() {
   const [activeMachinePage, setActiveMachinePage] = useState<MachinePageKey>("environmentApis");
   const [activeBusinessPage, setActiveBusinessPage] = useState<BusinessPageKey>("nodePorts");
   const [activeMiddlewarePage, setActiveMiddlewarePage] = useState<MiddlewarePageKey>("nacosKeys");
-  const [authenticated, setAuthenticated] = useState(
-    () => typeof window !== "undefined" && readUserWebSession() !== null,
-  );
+  const [authenticated, setAuthenticated] = useState(false);
 
   useEffect(() => {
     let alive = true;
     const savedSession = readUserWebSession();
-    if (!authenticated || !savedSession) {
+    if (!savedSession) {
       return;
     }
 
@@ -203,7 +213,11 @@ export default function Home() {
         }
         return response.json();
       })
-      .then(() => undefined)
+      .then(() => {
+        if (alive) {
+          setAuthenticated(true);
+        }
+      })
       .catch(() => {
         window.localStorage.removeItem(userSessionStorageKey);
         if (alive) {
@@ -214,7 +228,7 @@ export default function Home() {
     return () => {
       alive = false;
     };
-  }, [authenticated]);
+  }, []);
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -548,7 +562,7 @@ function BusinessSystemView({
 }) {
   const pages: Array<{ key: BusinessPageKey; label: string; hint: string }> = [
     { key: "nodePorts", label: "服务 NodePort", hint: "各环境对外端口" },
-    { key: "imageTags", label: "镜像 tag", hint: "服务当前镜像版本" },
+    { key: "imageTags", label: "镜像管理", hint: "按环境和 namespace 查看镜像" },
     { key: "gpuModels", label: "GPU 模型显存", hint: "模型、显存与空闲卡" },
     { key: "envKeys", label: "环境变量 key", hint: "只展示 key，不展示 value" },
   ];
@@ -567,12 +581,7 @@ function BusinessSystemView({
       ) : null}
 
       {activePage === "imageTags" ? (
-        <SectionBlock title="各环境服务镜像 tag" description="各环境服务当前使用镜像 tag，后续通过 K8S API 自动获取。">
-        <CompactTable
-          columns={["环境", "工作负载", "镜像"]}
-          rows={imageRows.map((row) => [row.env, row.workload, row.image])}
-        />
-        </SectionBlock>
+        <ImageInventoryView />
       ) : null}
 
       {activePage === "gpuModels" ? (
@@ -604,6 +613,161 @@ function BusinessSystemView({
       ) : null}
     </div>
   );
+}
+
+function ImageInventoryView() {
+  const [hosts, setHosts] = useState<K8sHostOption[]>([]);
+  const [hostId, setHostId] = useState("");
+  const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [namespace, setNamespace] = useState("");
+  const [images, setImages] = useState<ControllerImage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingNamespaces, setLoadingNamespaces] = useState(false);
+  const [querying, setQuerying] = useState(false);
+  const [hasQueried, setHasQueried] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchApi<K8sHostOption[]>("/api/k8s/hosts", controller.signal)
+      .then((rows) => {
+        setHosts(rows);
+        setLoadingNamespaces(rows.length > 0);
+        setHostId(rows[0] ? String(rows[0].host_id) : "");
+        setLoading(false);
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name !== "AbortError") {
+          setError(loadError.message);
+          setLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!hostId) {
+      return;
+    }
+    const controller = new AbortController();
+    fetchApi<{ namespaces: string[] }>(`/api/k8s/namespaces?host_id=${hostId}`, controller.signal)
+      .then((data) => {
+        setNamespaces(data.namespaces);
+        setNamespace(data.namespaces[0] ?? "");
+        setLoadingNamespaces(false);
+      })
+      .catch((loadError) => {
+        if (loadError instanceof Error && loadError.name !== "AbortError") {
+          setError(loadError.message);
+          setLoadingNamespaces(false);
+        }
+      });
+    return () => controller.abort();
+  }, [hostId]);
+
+  async function queryImages() {
+    if (!hostId || !namespace) {
+      return;
+    }
+    setQuerying(true);
+    setHasQueried(false);
+    setError("");
+    try {
+      const data = await fetchApi<{ images: ControllerImage[] }>(
+        `/api/k8s/images?host_id=${hostId}&namespace=${encodeURIComponent(namespace)}`,
+      );
+      setImages(data.images);
+      setHasQueried(true);
+    } catch (queryError) {
+      setError(queryError instanceof Error ? queryError.message : "运行中镜像查询失败");
+    } finally {
+      setQuerying(false);
+    }
+  }
+
+  const selectedHost = hosts.find((item) => String(item.host_id) === hostId);
+
+  return (
+    <SectionBlock title="镜像管理" description="选择已配置 K8S 凭证的环境主机和 namespace，再手动查询当前处于 Running 状态的 Pod 容器镜像。">
+      <div className="grid gap-4 rounded-[6px] border border-white/10 bg-[#070b1b] p-4 md:grid-cols-2 xl:grid-cols-[1.2fr_1fr_auto]">
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">环境 / 机器</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none" disabled={hosts.length === 0} onChange={(event) => {
+            setLoadingNamespaces(true);
+            setError("");
+            setNamespaces([]);
+            setNamespace("");
+            setImages([]);
+            setHasQueried(false);
+            setHostId(event.target.value);
+          }} value={hostId}>
+            {hosts.length === 0 ? <option value="">暂无已配置 K8S 凭证的主机</option> : null}
+            {hosts.map((host) => <option key={host.host_id} value={host.host_id}>{host.environment_name} / {host.hostname}</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">Namespace</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none" disabled={loadingNamespaces || namespaces.length === 0} onChange={(event) => {
+            setError("");
+            setImages([]);
+            setHasQueried(false);
+            setNamespace(event.target.value);
+          }} value={namespace}>
+            {loadingNamespaces ? <option value="">正在获取 namespace...</option> : null}
+            {!loadingNamespaces && namespaces.length === 0 ? <option value="">暂无可用 namespace</option> : null}
+            {namespaces.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+        <button className="h-11 self-end rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={!namespace || querying || loadingNamespaces} onClick={queryImages} type="button">
+          {querying ? "正在获取..." : "获取当前正在运行的镜像"}
+        </button>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-3 text-xs text-[#bfc9e7]/58">
+        <span>当前环境：{selectedHost?.environment_name ?? "未选择"}</span>
+        <span>当前机器：{selectedHost?.hostname ?? "未选择"}</span>
+        <span>K8S 状态：{selectedHost?.status ?? "未选择"}</span>
+      </div>
+
+      {error ? <p className="mt-4 rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-4 py-3 text-sm text-[#ff9aa3]">{error}</p> : null}
+      {loading ? <p className="mt-5 rounded-[6px] border border-white/10 bg-[#070b1b] px-4 py-8 text-center text-sm text-[#bfc9e7]/64">正在加载已配置 K8S 凭证的主机...</p> : null}
+      {!loading && !error && hosts.length === 0 ? <p className="mt-5 rounded-[6px] border border-dashed border-white/14 px-4 py-8 text-center text-sm text-[#bfc9e7]/64">请先在后台管理页面为主机保存 K8S 凭证内容。</p> : null}
+
+      {hasQueried && namespace && !error ? (
+        <div className="mt-5 overflow-x-auto">
+          <table className="w-full min-w-[1120px] text-left text-sm">
+            <thead className="text-xs text-[#bfc9e7]/52"><tr className="border-b border-white/10"><th className="w-32 py-3 pr-5">控制器类型</th><th className="w-[19%] py-3 pr-5">控制器名称</th><th className="w-[24%] py-3 pr-5">Pod 名称</th><th className="w-32 py-3 pr-5">副本数（就绪/期望）</th><th className="w-[14%] py-3 pr-5">容器名</th><th className="py-3 pr-4">容器完整镜像</th></tr></thead>
+            <tbody>
+              {images.map((image) => (
+                <tr className="border-b border-white/8 align-top text-[#bfc9e7]/78" key={`${image.controller_type}-${image.pod_name}`}>
+                  <td className="py-4 pr-5 font-bold text-white">{image.controller_type}</td>
+                  <td className="break-all py-4 pr-5 font-mono text-xs font-bold text-[#9fb0ff]">{image.controller_name}</td>
+                  <td className="break-all py-4 pr-5 font-mono text-xs leading-6">{image.pod_name}</td>
+                  <td className="py-4 pr-5 text-base font-black text-white">{image.ready_replicas}/{image.desired_replicas}</td>
+                  <td className="py-4 pr-5 font-mono text-xs leading-6">
+                    {image.containers.map((container) => <div key={`${container.name}-${container.image}`}>{container.name}</div>)}
+                  </td>
+                  <td className="py-4 pr-4 font-mono text-xs leading-6">
+                    {image.containers.map((container) => <div className="break-all" key={`${container.name}-${container.image}`}>{container.image}</div>)}
+                  </td>
+                </tr>
+              ))}
+              {images.length === 0 ? <tr><td className="py-10 text-center text-[#bfc9e7]/52" colSpan={6}>该 namespace 当前没有 Deployment、StatefulSet 或 DaemonSet 的 Running Pod</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </SectionBlock>
+  );
+}
+
+async function fetchApi<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`, { signal });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail ?? `接口请求失败：${path}`);
+  }
+  return response.json() as Promise<T>;
 }
 
 function MiddlewareSystemView({

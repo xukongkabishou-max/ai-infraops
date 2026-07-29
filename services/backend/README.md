@@ -8,6 +8,8 @@ AI InfraOps 后端服务。当前阶段使用 FastAPI + MySQL 实现 RBAC 基础
 - 权限
 - 菜单
 - 机器资源信息
+- 环境主机与 K8S 凭证登记
+- namespace 与 Running Pod 镜像查询
 
 ## Python 环境
 
@@ -48,6 +50,10 @@ REDIS_PASSWORD=change-me
 REDIS_DB=0
 REDIS_TLS=false
 SESSION_TTL_SECONDS=86400
+
+K8S_CONNECT_TIMEOUT_SECONDS=5
+K8S_READ_TIMEOUT_SECONDS=20
+K8S_CREDENTIAL_ENCRYPTION_KEY=replace-with-base64-encoded-32-byte-key
 ```
 
 ## 初始化 MySQL
@@ -85,8 +91,16 @@ GET  /api/rbac/permissions
 GET  /api/rbac/menus
 GET  /api/hosts
 POST /api/hosts
+PUT  /api/hosts/{host_id}
 DELETE /api/hosts/{host_id}
 GET  /api/hosts/{host_id}/metrics
+GET  /api/environments
+GET  /api/k8s/clusters
+POST /api/k8s/clusters
+DELETE /api/k8s/clusters/{cluster_id}
+GET  /api/k8s/hosts
+GET  /api/k8s/namespaces
+GET  /api/k8s/images
 ```
 
 ## 机器资源信息
@@ -117,3 +131,9 @@ backend_admin_web
 ```
 
 因此普通用户控制台和后端管理页面的会话互相隔离。
+
+## K8S 凭据
+
+管理页面在主机表单中提供 kubeconfig 多行输入栏。提交后 FastAPI 校验 YAML 结构，使用 AES-256-GCM 加密并将密文、随机 nonce、SHA-256 指纹和文件名保存到 MySQL；凭证通过唯一 `host_id` 与主机关联，查询 K8S API 时只在内存中解密。编辑时凭证输入留空会保留原密文。`K8S_CREDENTIAL_ENCRYPTION_KEY` 必须是 Base64 编码的 32 字节随机密钥，只保存在根目录 `.env`。
+
+kubeconfig 通常只有几 KB，使用 `MEDIUMBLOB` 存储不存在容量压力。需要重点保护的是 `.env` 中的主密钥，并在生产部署中通过 Secret/密钥管理系统注入。当前查询只需要 namespace 和 Pod 的只读权限。

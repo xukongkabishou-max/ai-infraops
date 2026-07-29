@@ -4,10 +4,10 @@ AI InfraOps 是一个面向统一运维的长期项目，目标是把集群、�
 
 ## 当前状态
 
-- `apps/admin-web`：普通用户控制台，登录页已接入 FastAPI RBAC 校验；当前已搭好“机器信息管理、业务系统管理、中间件系统管理、监控系统集成”的静态页面骨架，并保留已添加主机的 node-exporter 指标展示。
-- `apps/backend-admin-web`：后端 RBAC 管理页面，运行在 `3001` 端口；当前可管理 RBAC 基础数据和“机器资源信息”里的主机添加/删除。
+- `apps/admin-web`：普通用户控制台，登录页已接入 FastAPI RBAC 校验；“镜像 tag”已接入环境主机、namespace 和 Running Pod 镜像查询。
+- `apps/backend-admin-web`：后端 RBAC 管理页面，运行在 `3001` 端口；使用统一主机表单维护环境、主机属性和可选 K8S 凭证文本，并支持编辑已有主机。
 - `apps/user-web`：预留给普通用户门户。
-- `services/backend`：FastAPI + MySQL 后端，当前只覆盖登录、用户、角色、权限、菜单。
+- `services/backend`：FastAPI + MySQL 后端，当前覆盖 RBAC、机器资源、环境主机、K8S 凭证和 Running Pod 镜像查询。
 - `services`：后续可以按语言和领域继续拆分服务。
 - `docs`：记录架构、vibecoding 过程、参考项目和知识点。
 - `md-assets`：只放 Markdown 文档引用的截图、设计图和静态图片。
@@ -82,7 +82,7 @@ scripts/
   README.md                项目级脚本目录说明。后续放跨应用、跨服务的通用脚本。
 
 services/backend/scripts/
-  init_mysql.py            读取根目录 .env，连接 MySQL，执行 services/backend/sql/init.sql。
+  init_mysql.py            读取根目录 .env，连接 MySQL，执行 init.sql 及编号迁移 SQL。
 ```
 
 ## 机器资源信息
@@ -91,12 +91,25 @@ services/backend/scripts/
 
 ```text
 GET    /api/hosts                 查看主机列表，并刷新活跃/无法连接状态
-POST   /api/hosts                 添加或更新主机，字段包含 node_exporter_url、hostname、public_ip、private_ip
+POST   /api/hosts                 添加主机，同时记录环境和可选 kubeconfig 文本
+PUT    /api/hosts/{host_id}       更新已有主机；凭证留空时保留原值
 DELETE /api/hosts/{host_id}       删除主机
 GET    /api/hosts/{host_id}/metrics 查看 CPU 使用率、内存使用率、/ 目录磁盘使用率及对应容量详情
 ```
 
 node-exporter 可以稳定提供 CPU 累计时间、CPU 核数、内存、磁盘、系统内核和 `node_uname_info` 里的 nodename。CPU 使用率当前通过短间隔采样 `node_cpu_seconds_total`，按非 idle 时间占比计算；内存和磁盘使用率按已用/总量计算。公网 IP 当前从填写的 exporter URL 推断；私网 IP 不建议依赖 node-exporter 自动识别，后台添加主机时保留手动填写字段。
+
+## K8S 镜像查询
+
+数据关系为“环境 → 主机 → K8S 凭证”，凭证记录通过唯一 `host_id` 绑定主机，镜像不缓存到 MySQL。用户端只加载已配置凭证的环境主机，选择 namespace 并点击按钮后，FastAPI 实时读取 Running Pod，并按 Deployment、StatefulSet、DaemonSet 返回 Pod 名称、副本数和每个容器的完整镜像。
+
+```text
+GET    /api/k8s/hosts                         查看已配置 K8S 凭证的环境主机
+GET    /api/k8s/namespaces?host_id=...        实时读取 namespace
+GET    /api/k8s/images?host_id=...&namespace=... 实时读取 Running Pod 镜像
+```
+
+3001 页面不提供独立集群表单，只在统一主机表单中提供“K8S 凭证内容”输入栏。后端使用 AES-256-GCM 加密 kubeconfig 后把密文、随机 nonce 和指纹存入 MySQL，并绑定对应主机；主密钥只存在根目录 `.env`。详细设计与操作见 `docs/vibecoding/k8s-image-inventory.md`。
 
 ## 普通用户控制台功能骨架
 

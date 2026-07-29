@@ -34,11 +34,15 @@ type ApiMenu = {
 
 type HostRecord = {
   id: number;
+  environment_id?: number | null;
+  environment_code?: string | null;
+  environment_name?: string | null;
   hostname: string;
   public_ip: string;
   private_ip: string;
   node_exporter_url: string;
   status: "active" | "unreachable";
+  has_k8s_credential?: boolean | number;
   last_error?: string | null;
   last_seen_at?: string | null;
 };
@@ -78,6 +82,9 @@ export default function BackendAdminHome() {
   const [hostName, setHostName] = useState("");
   const [publicIp, setPublicIp] = useState("");
   const [privateIp, setPrivateIp] = useState("");
+  const [environmentName, setEnvironmentName] = useState("");
+  const [k8sCredentialContent, setK8sCredentialContent] = useState("");
+  const [editingHostId, setEditingHostId] = useState<number | null>(null);
   const [hostError, setHostError] = useState("");
   const [hostSaving, setHostSaving] = useState(false);
 
@@ -223,35 +230,58 @@ export default function BackendAdminHome() {
     }
   }
 
-  async function handleCreateHost(event: FormEvent<HTMLFormElement>) {
+  async function handleSaveHost(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setHostSaving(true);
     setHostError("");
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/hosts`, {
-        method: "POST",
+      const response = await fetch(`${apiBaseUrl}/api/hosts${editingHostId ? `/${editingHostId}` : ""}`, {
+        method: editingHostId ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           node_exporter_url: hostUrl,
           hostname: hostName,
           public_ip: publicIp,
           private_ip: privateIp,
+          environment_name: environmentName,
+          k8s_credential_name: k8sCredentialContent ? `${hostName}.yaml` : "",
+          k8s_credential_content: k8sCredentialContent,
         }),
       });
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.detail ?? "添加主机失败");
+        throw new Error(data.detail ?? `${editingHostId ? "更新" : "添加"}主机失败`);
       }
-      setHostName("");
-      setPublicIp("");
-      setPrivateIp("");
+      resetHostForm();
       await loadHosts();
-    } catch (createError) {
-      setHostError(createError instanceof Error ? createError.message : "添加主机失败");
+    } catch (saveError) {
+      setHostError(saveError instanceof Error ? saveError.message : "保存主机失败");
     } finally {
       setHostSaving(false);
     }
+  }
+
+  function resetHostForm() {
+    setEditingHostId(null);
+    setHostUrl("");
+    setHostName("");
+    setPublicIp("");
+    setPrivateIp("");
+    setEnvironmentName("");
+    setK8sCredentialContent("");
+  }
+
+  function handleEditHost(host: HostRecord) {
+    setEditingHostId(host.id);
+    setHostUrl(host.node_exporter_url);
+    setHostName(host.hostname);
+    setPublicIp(host.public_ip);
+    setPrivateIp(host.private_ip);
+    setEnvironmentName(host.environment_name ?? "");
+    setK8sCredentialContent("");
+    setHostError("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function handleDeleteHost(hostId: number) {
@@ -378,7 +408,7 @@ export default function BackendAdminHome() {
             <div>
               <p className="text-sm font-semibold text-[#4b5fc6]">{activeNav}</p>
               <h1 className="mt-1 text-2xl font-black tracking-normal text-white">
-                {activeNav === "机器资源信息" ? "添加、删除与检查 node-exporter 主机" : "登录、用户、角色、权限、菜单"}
+                {activeNav === "机器资源信息" ? "添加、删除与检查环境主机" : "登录、用户、角色、权限、菜单"}
               </h1>
             </div>
             <div className="flex items-center gap-3">
@@ -398,6 +428,8 @@ export default function BackendAdminHome() {
           <div className="space-y-6 px-6 py-6 lg:px-8">
             {activeNav === "机器资源信息" ? (
               <MachineHostManager
+                environmentName={environmentName}
+                editingHostId={editingHostId}
                 hostError={hostError}
                 hostName={hostName}
                 hostSaving={hostSaving}
@@ -405,12 +437,17 @@ export default function BackendAdminHome() {
                 hosts={hosts}
                 privateIp={privateIp}
                 publicIp={publicIp}
-                onCreateHost={handleCreateHost}
+                k8sCredentialContent={k8sCredentialContent}
+                onCancelEdit={resetHostForm}
+                onEditHost={handleEditHost}
+                onSaveHost={handleSaveHost}
                 onDeleteHost={handleDeleteHost}
+                setEnvironmentName={setEnvironmentName}
                 setHostName={setHostName}
                 setHostUrl={setHostUrl}
                 setPrivateIp={setPrivateIp}
                 setPublicIp={setPublicIp}
+                setK8sCredentialContent={setK8sCredentialContent}
               />
             ) : (
               <RbacOverview
@@ -546,13 +583,20 @@ function MachineHostManager({
   hostName,
   publicIp,
   privateIp,
+  environmentName,
+  k8sCredentialContent,
+  editingHostId,
   hostSaving,
   hostError,
   setHostUrl,
   setHostName,
   setPublicIp,
   setPrivateIp,
-  onCreateHost,
+  setEnvironmentName,
+  setK8sCredentialContent,
+  onSaveHost,
+  onEditHost,
+  onCancelEdit,
   onDeleteHost,
 }: {
   hosts: HostRecord[];
@@ -560,25 +604,36 @@ function MachineHostManager({
   hostName: string;
   publicIp: string;
   privateIp: string;
+  environmentName: string;
+  k8sCredentialContent: string;
+  editingHostId: number | null;
   hostSaving: boolean;
   hostError: string;
   setHostUrl: (value: string) => void;
   setHostName: (value: string) => void;
   setPublicIp: (value: string) => void;
   setPrivateIp: (value: string) => void;
-  onCreateHost: (event: FormEvent<HTMLFormElement>) => void;
+  setEnvironmentName: (value: string) => void;
+  setK8sCredentialContent: (value: string) => void;
+  onSaveHost: (event: FormEvent<HTMLFormElement>) => void;
+  onEditHost: (host: HostRecord) => void;
+  onCancelEdit: () => void;
   onDeleteHost: (hostId: number) => void;
 }) {
   return (
     <>
-      <form className="grid gap-4 rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur xl:grid-cols-[1.4fr_1fr_1fr_1fr_auto]" onSubmit={onCreateHost}>
+      <form className="grid gap-4 rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur md:grid-cols-2 xl:grid-cols-3" onSubmit={onSaveHost}>
         <label className="block">
-          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">node-exporter URL</span>
-          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setHostUrl(event.target.value)} value={hostUrl} />
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">机器名字</span>
+          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setHostName(event.target.value)} placeholder="例如 dev-gpu-node-01" required value={hostName} />
         </label>
         <label className="block">
-          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">主机名</span>
-          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setHostName(event.target.value)} placeholder="可自动识别" value={hostName} />
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">环境名称</span>
+          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setEnvironmentName(event.target.value)} placeholder="例如 开发 GPU 环境" required value={environmentName} />
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">node-exporter URL</span>
+          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setHostUrl(event.target.value)} placeholder="http://host:9100/metrics" required value={hostUrl} />
         </label>
         <label className="block">
           <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">公网 IP</span>
@@ -588,9 +643,17 @@ function MachineHostManager({
           <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">私网 IP</span>
           <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setPrivateIp(event.target.value)} placeholder="手动填写" value={privateIp} />
         </label>
-        <button className="mt-6 h-11 rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white transition hover:bg-[#1628ff] disabled:cursor-not-allowed disabled:opacity-60 xl:mt-6" disabled={hostSaving} type="submit">
-          {hostSaving ? "检测中..." : "添加主机"}
-        </button>
+        <label className="block md:col-span-2 xl:col-span-3">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">K8S 凭证内容</span>
+          <textarea className="min-h-52 w-full resize-y rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 py-3 font-mono text-xs leading-5 outline-none focus:border-[#7f91ff]" onChange={(event) => setK8sCredentialContent(event.target.value)} placeholder="可选：在这里粘贴完整 kubeconfig YAML 内容" value={k8sCredentialContent} />
+          {editingHostId ? <span className="mt-1 block text-xs text-[#bfc9e7]/52">留空会保留当前已加密保存的凭证；粘贴新内容会覆盖更新。</span> : null}
+        </label>
+        <div className="flex gap-3 md:col-span-2 xl:col-span-3">
+          <button className="h-11 flex-1 rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white transition hover:bg-[#1628ff] disabled:cursor-not-allowed disabled:opacity-60" disabled={hostSaving} type="submit">
+            {hostSaving ? "检测并保存中..." : editingHostId ? "整体更新" : "整体提交"}
+          </button>
+          {editingHostId ? <button className="h-11 rounded-[6px] border border-[#4b5fc6] px-5 text-sm font-bold text-[#bfc9e7]" onClick={onCancelEdit} type="button">取消编辑</button> : null}
+        </div>
       </form>
 
       {hostError ? (
@@ -598,15 +661,17 @@ function MachineHostManager({
       ) : null}
 
       <article className="rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur">
-        <h2 className="mb-4 text-lg font-black">所有主机信息</h2>
+        <h2 className="mb-4 text-lg font-black">已添加的主机信息</h2>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[840px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-white/10 text-left text-[#bfc9e7]/60">
                 <th className="py-3 font-semibold">主机名</th>
+                <th className="py-3 font-semibold">环境</th>
                 <th className="py-3 font-semibold">公网 IP</th>
                 <th className="py-3 font-semibold">私网 IP</th>
                 <th className="py-3 font-semibold">状态</th>
+                <th className="py-3 font-semibold">K8S 凭证</th>
                 <th className="py-3 font-semibold">node-exporter</th>
                 <th className="py-3 text-right font-semibold">操作</th>
               </tr>
@@ -615,6 +680,7 @@ function MachineHostManager({
               {hosts.map((host) => (
                 <tr className="border-b border-white/8" key={host.id}>
                   <td className="py-4 font-bold text-white">{host.hostname || "未命名主机"}</td>
+                  <td className="py-4 text-[#bfc9e7]/78">{host.environment_name || "未关联"}</td>
                   <td className="py-4 text-[#bfc9e7]/78">{host.public_ip || "-"}</td>
                   <td className="py-4 text-[#bfc9e7]/78">{host.private_ip || "未填写"}</td>
                   <td className="py-4">
@@ -622,8 +688,10 @@ function MachineHostManager({
                       {host.status === "active" ? "活跃" : "无法连接"}
                     </span>
                   </td>
+                  <td className="py-4 text-[#bfc9e7]/78">{host.has_k8s_credential ? "已配置" : "未配置"}</td>
                   <td className="max-w-[280px] truncate py-4 text-[#bfc9e7]/64">{host.node_exporter_url}</td>
                   <td className="py-4 text-right">
+                    <button className="mr-4 text-sm font-bold text-[#9fb0ff]" onClick={() => onEditHost(host)} type="button">编辑</button>
                     <button className="text-sm font-bold text-[#ff7f8a]" onClick={() => onDeleteHost(host.id)} type="button">
                       删除
                     </button>

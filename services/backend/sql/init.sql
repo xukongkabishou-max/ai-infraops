@@ -92,8 +92,21 @@ CREATE TABLE IF NOT EXISTS `rbac_menu_permissions` (
   CONSTRAINT `fk_rbac_menu_permissions_permission` FOREIGN KEY (`permission_id`) REFERENCES `rbac_permissions` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `infra_environments` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `code` VARCHAR(64) NOT NULL,
+  `name` VARCHAR(128) NOT NULL,
+  `description` TEXT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_infra_environments_code` (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `machine_hosts` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `environment_id` BIGINT UNSIGNED NULL,
   `hostname` VARCHAR(128) NOT NULL DEFAULT '',
   `public_ip` VARCHAR(64) NOT NULL DEFAULT '',
   `private_ip` VARCHAR(64) NOT NULL DEFAULT '',
@@ -105,7 +118,35 @@ CREATE TABLE IF NOT EXISTS `machine_hosts` (
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_machine_hosts_node_exporter_url` (`node_exporter_url`),
-  KEY `idx_machine_hosts_status` (`status`)
+  KEY `idx_machine_hosts_status` (`status`),
+  KEY `idx_machine_hosts_environment_id` (`environment_id`),
+  CONSTRAINT `fk_machine_hosts_environment` FOREIGN KEY (`environment_id`) REFERENCES `infra_environments` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `k8s_clusters` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `host_id` BIGINT UNSIGNED NULL,
+  `environment_id` BIGINT UNSIGNED NOT NULL,
+  `name` VARCHAR(128) NOT NULL,
+  `api_server_url` VARCHAR(512) NOT NULL DEFAULT '',
+  `credential_ref` VARCHAR(255) NOT NULL DEFAULT '',
+  `credential_name` VARCHAR(255) NOT NULL DEFAULT '',
+  `credential_ciphertext` MEDIUMBLOB NULL,
+  `credential_nonce` VARBINARY(12) NULL,
+  `credential_fingerprint` CHAR(64) NOT NULL DEFAULT '',
+  `context_name` VARCHAR(128) NOT NULL DEFAULT '',
+  `verify_ssl` TINYINT(1) NOT NULL DEFAULT 1,
+  `status` ENUM('configured','active','unreachable','disabled') NOT NULL DEFAULT 'configured',
+  `last_error` TEXT NULL,
+  `last_seen_at` DATETIME NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_k8s_clusters_host_id` (`host_id`),
+  UNIQUE KEY `uk_k8s_clusters_environment_name` (`environment_id`, `name`),
+  KEY `idx_k8s_clusters_status` (`status`),
+  CONSTRAINT `fk_k8s_clusters_host` FOREIGN KEY (`host_id`) REFERENCES `machine_hosts` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_k8s_clusters_environment` FOREIGN KEY (`environment_id`) REFERENCES `infra_environments` (`id`) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO `rbac_roles` (`code`, `name`, `description`, `is_system`, `is_active`)
@@ -123,7 +164,12 @@ VALUES
   ('menu:publish', '发布菜单', 'button', '发布菜单配置', 1),
   ('host:list', '查看机器资源信息', 'api', '查看主机列表和机器资源指标', 1),
   ('host:create', '添加机器资源主机', 'api', '添加 node-exporter 主机', 1),
-  ('host:delete', '删除机器资源主机', 'api', '删除 node-exporter 主机', 1)
+  ('host:delete', '删除机器资源主机', 'api', '删除 node-exporter 主机', 1),
+  ('environment:list', '查看环境', 'api', '查看环境及其主机、K8S 集群数量', 1),
+  ('k8s:cluster:list', '查看 K8S 集群', 'api', '查看环境下的 K8S 集群', 1),
+  ('k8s:cluster:create', '登记 K8S 集群', 'api', '登记 K8S API 与 kubeconfig 引用', 1),
+  ('k8s:cluster:delete', '删除 K8S 集群', 'api', '删除 K8S 集群登记信息', 1),
+  ('k8s:image:list', '查看 K8S 镜像', 'api', '查看 namespace 下工作负载使用的镜像', 1)
 ON DUPLICATE KEY UPDATE `name` = VALUES(`name`), `is_active` = 1;
 
 INSERT INTO `rbac_users` (`username`, `password_hash`, `display_name`, `email`, `is_active`, `is_superuser`)

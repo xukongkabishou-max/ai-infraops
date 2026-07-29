@@ -22,6 +22,9 @@ class Settings:
     redis_db: int = int(os.getenv("REDIS_DB", "0"))
     redis_tls: bool = os.getenv("REDIS_TLS", "false").lower() in {"1", "true", "yes"}
     session_ttl_seconds: int = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
+    k8s_connect_timeout_seconds: int = int(os.getenv("K8S_CONNECT_TIMEOUT_SECONDS", "5"))
+    k8s_read_timeout_seconds: int = int(os.getenv("K8S_READ_TIMEOUT_SECONDS", "20"))
+    k8s_credential_encryption_key: str = os.getenv("K8S_CREDENTIAL_ENCRYPTION_KEY", "")
     cors_origins: tuple[str, ...] = (
         "http://localhost:3000",
         "http://localhost:3001",

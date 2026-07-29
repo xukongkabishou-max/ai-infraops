@@ -12,7 +12,7 @@ AI InfraOps 采用 monorepo 结构，前端、后端服务、共享包、基础�
 `apps/admin-web` 当前先按静态页面搭好以下侧边功能栏，后续再逐步接入真实 API：
 
 - `机器信息管理`：下分 `环境 API 地址`、`机器账号列表`、`中间件账号获取` 三个子页面。环境 API 地址只给研发展示 CPU、内存、根目录磁盘、公网 IP、私网 IP、Loki 日志、K8S Pod 状态与事件的查询地址，不在该子页直接执行查询。
-- `业务系统管理`：下分 `服务 NodePort`、`镜像 tag`、`GPU 模型显存`、`环境变量 key` 四个子页面。
+- `业务系统管理`：下分 `服务 NodePort`、`镜像 tag`、`GPU 模型显存`、`环境变量 key` 四个子页面。其中镜像页通过“已配置凭证的环境主机 → namespace”筛选，并由按钮查询真实 Running Pod 镜像。
 - `中间件系统管理`：下分 `Nacos key 获取`、`数据库可用性校验` 两个子页面。Nacos key 后续由前端传环境和服务给后端，后端请求 Codex，再通过 skill 获取并隐藏 value 后返回 key；数据库校验后续由后端脚本执行。
 - `监控系统集成`：预留 Prometheus、Loki、告警中心和 SLO 守护等集成入口。
 
@@ -40,3 +40,12 @@ AI InfraOps 采用 monorepo 结构，前端、后端服务、共享包、基础�
 - 前端先有可用体验，后端按真实集成逐个落地。
 - 权限、审计和中间件用户管理是平台核心能力，应尽早抽象成稳定模型。
 - K8S、Doris、Milvus、数据库和消息队列等集成可以按 adapter 方式逐步加入。
+
+## 环境与 K8S 资源边界
+
+- `infra_environments` 是环境主数据，环境名称由用户维护，内部编码由后端生成。
+- `machine_hosts.environment_id` 表示主机所属环境。
+- `k8s_clusters.host_id` 唯一绑定已添加主机，`environment_id` 同步记录其环境归属。
+- kubeconfig 不以明文入库、不入 Git。后端使用 AES-256-GCM 加密后，将密文、随机 nonce、指纹和原文件名保存到 `k8s_clusters`；主密钥只从 `.env` 读取。
+- 当前管理端采用一个完整主机表单：可粘贴 kubeconfig 文本，并通过列表“编辑”更新已有属性；编辑时凭证留空即保留原值。
+- namespace 和 Running Pod 镜像列表来自 K8S API 实时查询，只按 Deployment、StatefulSet、DaemonSet 聚合 Pod 名称、副本数和容器完整镜像，不创建镜像事实表。
