@@ -17,6 +17,7 @@ type K8sHostOption = {
   environment_id: number;
   environment_name: string;
   hostname: string;
+  public_ip?: string | null;
   cluster_id: number;
   status: "configured" | "active" | "unreachable" | "disabled";
   last_error?: string | null;
@@ -29,6 +30,67 @@ type ControllerImage = {
   ready_replicas: number;
   desired_replicas: number;
   containers: Array<{ name: string; image: string }>;
+};
+
+type EnvK8sHostOption = K8sHostOption & {
+  namespace_keys: string[];
+};
+
+type EnvWorkload = {
+  kind: "Deployment" | "StatefulSet";
+  name: string;
+  ready_replicas: number;
+  desired_replicas: number;
+};
+
+type EnvKeyResult = {
+  namespace: string;
+  workload: { kind: "Deployment" | "StatefulSet"; name: string };
+  pod_name: string;
+  containers: Array<{
+    container_name: string;
+    keys: string[];
+    error?: string | null;
+  }>;
+};
+
+type NodePortService = {
+  service_name: string;
+  service_display_name: string;
+  port_name: string;
+  protocol: string;
+  service_port: number;
+  node_port: number;
+  public_address?: string | null;
+  visible: boolean;
+  note?: string | null;
+};
+
+const environmentKeysPageSize = 15;
+
+type NacosInstanceOption = {
+  id: number;
+  environment_id: number;
+  environment_name: string;
+  instance_name: string;
+  status: "configured" | "active" | "unreachable" | "disabled";
+  last_seen_at?: string | null;
+};
+
+type NacosCatalog = {
+  instance: NacosInstanceOption;
+  namespace_count: number;
+  config_count: number;
+  namespaces: Array<{
+    namespace_id: string;
+    namespace_name: string;
+    config_count: number;
+    configs: Array<{
+      group: string;
+      data_id: string;
+      type: string;
+    }>;
+  }>;
 };
 
 const navigationItems: Array<{
@@ -63,14 +125,14 @@ const sectionMeta: Record<
     title: "服务端口、镜像版本、GPU 模型与环境变量",
     summary:
       "展示各环境服务对外 NodePort、当前镜像 tag、GPU 环境模型部署状态、显存占用和空闲卡位，并列出服务环境变量 key。",
-    implementation: "服务信息通过 K8S API 获取，GPU 信息通过 dcgm-exporter 获取，环境变量 key 后续由大模型按内部提示词提取。",
+    implementation: "服务信息通过 K8S API 获取，GPU 信息通过 dcgm-exporter 获取；环境变量 key 通过受 Namespace 白名单约束的 K8S Pod Exec 获取。",
   },
   middleware: {
     eyebrow: "中间件系统管理",
-    title: "配置 key 盘点与核心中间件可用性校验",
+    title: "配置目录与核心中间件可用性校验",
     summary:
-      "展示 Nacos 当前配置 key，并为 MySQL、Doris、Redis、Kafka 等核心组件预留快速可用性校验入口。",
-    implementation: "Nacos 配置 key 后续由大模型按内部提示词提取；数据库可用性通过脚本模拟读写、生产消费和删除流程。",
+      "展示 Nacos 的 Namespace、Group、配置名称与格式，并为 MySQL、Doris、Redis、Kafka 等核心组件预留快速可用性校验入口。",
+    implementation: "Nacos 目录通过官方元数据接口实时获取且不读取配置正文；数据库可用性后续通过脚本模拟读写、生产消费和删除流程。",
   },
   monitoring: {
     eyebrow: "监控系统集成",
@@ -138,29 +200,10 @@ const middlewareAccountRows = [
   { env: "测试环境", middleware: "Kafka", instance: "event-bus", username: "ops_consumer", password: "******", privilege: "测试 Topic 消费" },
 ];
 
-const nodePortRows = [
-  { env: "开发 GPU 环境", namespace: "ai-serving", service: "model-gateway", nodePort: "32080", protocol: "HTTP" },
-  { env: "开发 GPU 环境", namespace: "infra", service: "nacos-console", nodePort: "31848", protocol: "HTTP" },
-  { env: "测试 GPU 环境", namespace: "observability", service: "grafana", nodePort: "31610", protocol: "HTTP" },
-  { env: "生产 CPU 环境", namespace: "backend", service: "api-gateway", nodePort: "30080", protocol: "HTTP" },
-];
-
 const gpuModelRows = [
   { env: "开发 GPU 环境", model: "Qwen-72B-Instruct", gpu: "GPU-0, GPU-1", memory: "68 GiB / 96 GiB", freeCard: "GPU-2" },
   { env: "测试 GPU 环境", model: "Embedding-BGE", gpu: "GPU-3", memory: "18 GiB / 48 GiB", freeCard: "GPU-0, GPU-1" },
   { env: "生产 GPU 环境", model: "Rerank-Service", gpu: "GPU-5", memory: "9 GiB / 24 GiB", freeCard: "待接入" },
-];
-
-const envKeyRows = [
-  { service: "model-gateway", keys: ["MODEL_NAME", "CUDA_VISIBLE_DEVICES", "SERVICE_PORT", "LOG_LEVEL"] },
-  { service: "rag-api", keys: ["VECTOR_STORE", "MILVUS_COLLECTION", "REQUEST_TIMEOUT", "CACHE_TTL"] },
-  { service: "ops-api", keys: ["MYSQL_DATABASE", "REDIS_DB", "KAFKA_TOPIC", "NACOS_NAMESPACE"] },
-];
-
-const nacosRows = [
-  { namespace: "dev-gpu", group: "DEFAULT_GROUP", key: "model-gateway.yaml", owner: "AI 平台" },
-  { namespace: "test-gpu", group: "DEFAULT_GROUP", key: "rag-api.yaml", owner: "知识库服务" },
-  { namespace: "prod-cpu", group: "INFRA_GROUP", key: "ops-api.yaml", owner: "运维平台" },
 ];
 
 const healthCheckRows = [
@@ -572,12 +615,7 @@ function BusinessSystemView({
       <SubPageNav activeKey={activePage} items={pages} onChange={onSetActivePage} />
 
       {activePage === "nodePorts" ? (
-        <SectionBlock title="各环境服务 NodePort 对外端口" description="除新疆联通外，各环境服务对外 NodePort 端口静态展示。">
-        <CompactTable
-          columns={["环境", "命名空间", "服务", "NodePort", "协议"]}
-          rows={nodePortRows.map((row) => [row.env, row.namespace, row.service, row.nodePort, row.protocol])}
-        />
-        </SectionBlock>
+        <NodePortInventoryView />
       ) : null}
 
       {activePage === "imageTags" ? (
@@ -594,25 +632,485 @@ function BusinessSystemView({
       ) : null}
 
       {activePage === "envKeys" ? (
-        <SectionBlock title="环境变量 key 提取" description="只展示 key，不展示 value；后续通过内部提示词限定大模型提取范围。">
-          <div className="space-y-3">
-            {envKeyRows.map((row) => (
-              <div className="rounded-[6px] border border-white/10 bg-[#070b1b] p-4" key={row.service}>
-                <p className="text-sm font-bold text-white">{row.service}</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {row.keys.map((key) => (
-                    <span className="rounded-full border border-[#4b5fc6]/42 px-3 py-1 text-xs font-mono text-[#bfc9e7]/78" key={key}>
-                      {key}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </SectionBlock>
+        <EnvironmentKeyInventoryView />
       ) : null}
     </div>
   );
+}
+
+function NodePortInventoryView() {
+  const [hosts, setHosts] = useState<K8sHostOption[]>([]);
+  const [hostId, setHostId] = useState("");
+  const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [namespace, setNamespace] = useState("");
+  const [services, setServices] = useState<NodePortService[]>([]);
+  const [loadingHosts, setLoadingHosts] = useState(true);
+  const [loadingNamespaces, setLoadingNamespaces] = useState(false);
+  const [querying, setQuerying] = useState(false);
+  const [hasQueried, setHasQueried] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchUserApi<K8sHostOption[]>("/api/k8s/nodeports/hosts", controller.signal)
+      .then((rows) => {
+        setHosts(rows);
+        setLoadingNamespaces(rows.length > 0);
+        setHostId(rows[0] ? String(rows[0].host_id) : "");
+      })
+      .catch((loadError) => {
+        if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+          setError(loadError instanceof Error ? loadError.message : "所属环境加载失败");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingHosts(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!hostId) return;
+    const controller = new AbortController();
+    fetchUserApi<{ namespaces: string[] }>(
+      `/api/k8s/nodeports/namespaces?host_id=${hostId}`,
+      controller.signal,
+    )
+      .then((data) => {
+        setNamespaces(data.namespaces);
+        setNamespace(data.namespaces[0] ?? "");
+      })
+      .catch((loadError) => {
+        if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+          setError(loadError instanceof Error ? loadError.message : "Namespace 加载失败");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingNamespaces(false);
+      });
+    return () => controller.abort();
+  }, [hostId]);
+
+  async function queryNodePorts() {
+    if (!hostId || !namespace) return;
+    setQuerying(true);
+    setHasQueried(false);
+    setError("");
+    try {
+      const data = await fetchUserApi<{ services: NodePortService[] }>(
+        `/api/k8s/nodeports?host_id=${hostId}&namespace=${encodeURIComponent(namespace)}`,
+      );
+      setServices(data.services.filter((service) => service.visible));
+      setHasQueried(true);
+    } catch (queryError) {
+      setError(queryError instanceof Error ? queryError.message : "NodePort 查询失败");
+    } finally {
+      setQuerying(false);
+    }
+  }
+
+  const selectedHost = hosts.find((host) => String(host.host_id) === hostId);
+  const servicePortCounts = services.reduce<Record<string, number>>((counts, service) => {
+    counts[service.service_name] = (counts[service.service_name] ?? 0) + 1;
+    return counts;
+  }, {});
+
+  return (
+    <SectionBlock title="服务 NodePort 公网调用地址" description="选择所属环境和 Namespace，查询当前 NodePort 类型 Service 的公网调用地址。">
+      <div className="grid gap-4 rounded-[6px] border border-white/10 bg-[#070b1b] p-4 md:grid-cols-2 xl:grid-cols-[1.2fr_1fr_auto]">
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">所属环境 / 主机</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none disabled:opacity-60" disabled={loadingHosts || hosts.length === 0} onChange={(event) => {
+            setError("");
+            setNamespaces([]);
+            setNamespace("");
+            setServices([]);
+            setHasQueried(false);
+            setLoadingNamespaces(true);
+            setHostId(event.target.value);
+          }} value={hostId}>
+            {hosts.length === 0 ? <option value="">暂无已配置 K8S 凭证的环境</option> : null}
+            {hosts.map((host) => <option key={host.host_id} value={host.host_id}>{host.environment_name} / {host.hostname}</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">Namespace</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none disabled:opacity-60" disabled={loadingNamespaces || namespaces.length === 0} onChange={(event) => {
+            setError("");
+            setServices([]);
+            setHasQueried(false);
+            setNamespace(event.target.value);
+          }} value={namespace}>
+            {loadingNamespaces ? <option value="">正在获取 Namespace...</option> : null}
+            {!loadingNamespaces && namespaces.length === 0 ? <option value="">暂无可用 Namespace</option> : null}
+            {namespaces.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+        <button className="h-11 self-end rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={!namespace || querying || loadingNamespaces} onClick={queryNodePorts} type="button">
+          {querying ? "正在查询..." : "获取 NodePort 地址"}
+        </button>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-3 text-xs text-[#bfc9e7]/58">
+        <span>所属环境：{selectedHost?.environment_name ?? "未选择"}</span>
+        <span>主机：{selectedHost?.hostname ?? "未选择"}</span>
+        <span>公网 IP：{selectedHost?.public_ip || "未配置"}</span>
+      </div>
+
+      {error ? <p className="mt-4 rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-4 py-3 text-sm text-[#ff9aa3]">{error}</p> : null}
+      {loadingHosts ? <p className="mt-5 rounded-[6px] border border-white/10 bg-[#070b1b] px-4 py-8 text-center text-sm text-[#bfc9e7]/64">正在加载已配置 K8S 凭证的环境...</p> : null}
+      {!loadingHosts && !error && hosts.length === 0 ? <p className="mt-5 rounded-[6px] border border-dashed border-white/14 px-4 py-8 text-center text-sm text-[#bfc9e7]/64">暂无可查询的 K8S 环境。</p> : null}
+
+      {hasQueried && !error ? (
+        <div className="mt-5 overflow-x-auto">
+          <table className="w-full min-w-[900px] text-left text-sm">
+            <thead className="text-xs text-[#bfc9e7]/52">
+              <tr className="border-b border-white/10">
+                <th className="w-[32%] py-3 pr-5">调用名称</th>
+                <th className="w-[18%] py-3 pr-5">端口名称</th>
+                <th className="w-[28%] py-3 pr-5">公网调用地址</th>
+                <th className="w-24 py-3 pr-5">协议</th>
+                <th className="py-3 pr-4">注释</th>
+              </tr>
+            </thead>
+            <tbody>
+              {services.map((service) => {
+                const hasMultiplePorts = servicePortCounts[service.service_name] > 1;
+                const callName = `${service.service_display_name}服务公网调用地址${hasMultiplePorts ? `（${service.port_name}）` : ""}`;
+                return (
+                  <tr className="border-b border-white/8 text-[#bfc9e7]/78" key={`${service.service_name}-${service.port_name}-${service.node_port}`}>
+                    <td className="py-4 pr-5 font-bold text-white">{callName}</td>
+                    <td className="py-4 pr-5 font-mono text-xs text-[#9fb0ff]">{service.port_name}</td>
+                    <td className="py-4 pr-5 font-mono text-sm font-bold text-white">{service.public_address ?? "未配置公网 IP"}</td>
+                    <td className="py-4 pr-5">{service.protocol}</td>
+                    <td className="py-4 pr-4">{service.note ?? "-"}</td>
+                  </tr>
+                );
+              })}
+              {services.length === 0 ? <tr><td className="py-10 text-center text-[#bfc9e7]/52" colSpan={5}>该 Namespace 当前没有 NodePort 类型的 Service</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </SectionBlock>
+  );
+}
+
+function EnvironmentKeyInventoryView() {
+  const [hosts, setHosts] = useState<EnvK8sHostOption[]>([]);
+  const [hostId, setHostId] = useState("");
+  const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [namespace, setNamespace] = useState("");
+  const [workloads, setWorkloads] = useState<EnvWorkload[]>([]);
+  const [workloadKey, setWorkloadKey] = useState("");
+  const [result, setResult] = useState<EnvKeyResult | null>(null);
+  const [loadingHosts, setLoadingHosts] = useState(true);
+  const [loadingNamespaces, setLoadingNamespaces] = useState(false);
+  const [loadingWorkloads, setLoadingWorkloads] = useState(false);
+  const [querying, setQuerying] = useState(false);
+  const [resultRevision, setResultRevision] = useState(0);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchUserApi<EnvK8sHostOption[]>("/api/k8s/env/hosts", controller.signal)
+      .then((rows) => {
+        setHosts(rows);
+        setLoadingNamespaces(rows.length > 0);
+        setHostId(rows[0] ? String(rows[0].host_id) : "");
+      })
+      .catch((loadError) => {
+        if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+          setError(loadError instanceof Error ? loadError.message : "所属环境加载失败");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingHosts(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!hostId) return;
+
+    const controller = new AbortController();
+    fetchUserApi<{ namespaces: string[] }>(`/api/k8s/env/namespaces?host_id=${hostId}`, controller.signal)
+      .then((data) => {
+        setNamespaces(data.namespaces);
+        setLoadingWorkloads(data.namespaces.length > 0);
+        setNamespace(data.namespaces[0] ?? "");
+      })
+      .catch((loadError) => {
+        if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+          setError(loadError instanceof Error ? loadError.message : "Namespace 加载失败");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingNamespaces(false);
+      });
+    return () => controller.abort();
+  }, [hostId]);
+
+  useEffect(() => {
+    if (!hostId || !namespace) return;
+
+    const controller = new AbortController();
+    fetchUserApi<{ workloads: EnvWorkload[] }>(
+      `/api/k8s/env/workloads?host_id=${hostId}&namespace=${encodeURIComponent(namespace)}`,
+      controller.signal,
+    )
+      .then((data) => {
+        setWorkloads(data.workloads);
+        const first = data.workloads[0];
+        setWorkloadKey(first ? `${first.kind}:${first.name}` : "");
+      })
+      .catch((loadError) => {
+        if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+          setError(loadError instanceof Error ? loadError.message : "工作负载加载失败");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingWorkloads(false);
+      });
+    return () => controller.abort();
+  }, [hostId, namespace]);
+
+  async function queryEnvironmentKeys() {
+    const workload = workloads.find((item) => `${item.kind}:${item.name}` === workloadKey);
+    if (!workload || !hostId || !namespace) return;
+    setQuerying(true);
+    setError("");
+    setResult(null);
+    try {
+      const data = await fetchUserApi<EnvKeyResult>(
+        `/api/k8s/env/keys?host_id=${hostId}&namespace=${encodeURIComponent(namespace)}&kind=${workload.kind}&workload=${encodeURIComponent(workload.name)}`,
+      );
+      setResult(data);
+      setResultRevision((current) => current + 1);
+    } catch (queryError) {
+      setError(queryError instanceof Error ? queryError.message : "环境变量 Key 查询失败");
+    } finally {
+      setQuerying(false);
+    }
+  }
+
+  const selectedHost = hosts.find((host) => String(host.host_id) === hostId);
+
+  return (
+    <SectionBlock title="环境变量 Key 列表" description="按后台配置的 Namespace 白名单查询任一 Running Pod。容器内只输出变量名称，接口不会返回 value。">
+      <div className="grid gap-4 rounded-[6px] border border-white/10 bg-[#070b1b] p-4 md:grid-cols-2 xl:grid-cols-[1.1fr_0.8fr_1.2fr_auto]">
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">所属环境 / 主机</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none disabled:opacity-60" disabled={loadingHosts || hosts.length === 0} onChange={(event) => { setError(""); setNamespaces([]); setNamespace(""); setWorkloads([]); setWorkloadKey(""); setResult(null); setLoadingNamespaces(true); setHostId(event.target.value); }} value={hostId}>
+            {hosts.length === 0 ? <option value="">暂无已开放环境</option> : null}
+            {hosts.map((host) => <option key={host.host_id} value={host.host_id}>{host.environment_name} / {host.hostname}</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">Namespace</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none disabled:opacity-60" disabled={loadingNamespaces || namespaces.length === 0} onChange={(event) => { setError(""); setWorkloads([]); setWorkloadKey(""); setResult(null); setLoadingWorkloads(true); setNamespace(event.target.value); }} value={namespace}>
+            {loadingNamespaces ? <option value="">正在校验白名单...</option> : null}
+            {!loadingNamespaces && namespaces.length === 0 ? <option value="">暂无可用 Namespace</option> : null}
+            {namespaces.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">Deployment / StatefulSet</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none disabled:opacity-60" disabled={loadingWorkloads || workloads.length === 0} onChange={(event) => { setError(""); setResult(null); setWorkloadKey(event.target.value); }} value={workloadKey}>
+            {loadingWorkloads ? <option value="">正在加载工作负载...</option> : null}
+            {!loadingWorkloads && workloads.length === 0 ? <option value="">暂无可用工作负载</option> : null}
+            {workloads.map((item) => <option key={`${item.kind}:${item.name}`} value={`${item.kind}:${item.name}`}>{item.kind} / {item.name} ({item.ready_replicas}/{item.desired_replicas})</option>)}
+          </select>
+        </label>
+        <button className="h-11 self-end rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={!workloadKey || querying || loadingWorkloads} onClick={queryEnvironmentKeys} type="button">
+          {querying ? "正在查询..." : "获取 Key 列表"}
+        </button>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-3 text-xs text-[#bfc9e7]/58">
+        <span>所属环境：{selectedHost?.environment_name ?? "未选择"}</span>
+        <span>主机：{selectedHost?.hostname ?? "未选择"}</span>
+        <span>白名单：{selectedHost?.namespace_keys.join(", ") || "未配置"}</span>
+      </div>
+      {error ? <p className="mt-4 rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-4 py-3 text-sm text-[#ff9aa3]">{error}</p> : null}
+      {!loadingHosts && hosts.length === 0 && !error ? <p className="mt-5 rounded-[6px] border border-dashed border-white/14 px-4 py-8 text-center text-sm text-[#bfc9e7]/64">请先在后台管理页面为带 K8S 凭证的主机配置 Namespace Key 白名单。</p> : null}
+
+      {result ? (
+        <div className="mt-5 space-y-4">
+          <div className="flex flex-wrap gap-4 border-b border-white/10 pb-4 text-sm text-[#bfc9e7]/68">
+            <span>{result.workload.kind}：<strong className="font-mono text-white">{result.workload.name}</strong></span>
+            <span>抽取 Pod：<strong className="font-mono text-white">{result.pod_name}</strong></span>
+          </div>
+          {result.containers.map((container) => (
+            <EnvironmentKeyContainerList
+              container={container}
+              key={`${resultRevision}-${container.container_name}`}
+            />
+          ))}
+        </div>
+      ) : null}
+    </SectionBlock>
+  );
+}
+
+function EnvironmentKeyContainerList({
+  container,
+}: {
+  container: EnvKeyResult["containers"][number];
+}) {
+  const [page, setPage] = useState(1);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [prefixSearch, setPrefixSearch] = useState(false);
+  const normalizedQuery = caseSensitive ? searchQuery.trim() : searchQuery.trim().toLowerCase();
+  const filteredKeys = normalizedQuery
+    ? container.keys.filter((key) => {
+        const normalizedKey = caseSensitive ? key : key.toLowerCase();
+        return prefixSearch ? normalizedKey.startsWith(normalizedQuery) : normalizedKey === normalizedQuery;
+      })
+    : container.keys;
+  const totalPages = Math.max(1, Math.ceil(filteredKeys.length / environmentKeysPageSize));
+  const safePage = Math.min(page, totalPages);
+  const startIndex = (safePage - 1) * environmentKeysPageSize;
+  const visibleKeys = filteredKeys.slice(startIndex, startIndex + environmentKeysPageSize);
+  const pageNumbers = getVisiblePageNumbers(safePage, totalPages);
+
+  return (
+    <section
+      className="rounded-[6px] border border-white/10 bg-[#070b1b] p-5"
+      data-testid={`env-key-container-${container.container_name}`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
+        <h3 className="font-mono text-sm font-black text-white">容器：{container.container_name}</h3>
+        <span className="text-xs text-[#bfc9e7]/52">
+          {normalizedQuery ? `${filteredKeys.length} 个结果 / 共 ${container.keys.length} 个 Key` : `${container.keys.length} 个 Key`}
+        </span>
+      </div>
+
+      {container.error ? <p className="mt-4 text-sm text-[#ff9aa3]">{container.error}</p> : null}
+      {!container.error && container.keys.length === 0 ? <p className="py-8 text-center text-sm text-[#bfc9e7]/52">该容器未返回环境变量 Key</p> : null}
+      {!container.error && container.keys.length > 0 ? (
+        <>
+          <div className="mt-4 flex flex-wrap items-end gap-4 border-b border-white/10 pb-4">
+            <label className="min-w-[16rem] flex-1">
+              <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">搜索指定 Key</span>
+              <input
+                aria-label={`${container.container_name} 搜索指定 Key`}
+                className="h-10 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 font-mono text-sm text-white outline-none placeholder:text-[#bfc9e7]/32 focus:border-[#4b5fc6]"
+                onChange={(event) => {
+                  setSearchQuery(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="输入完整 Key"
+                type="search"
+                value={searchQuery}
+              />
+            </label>
+            <label className="flex h-10 cursor-pointer items-center gap-2 text-sm text-[#bfc9e7]/68">
+              <input
+                checked={caseSensitive}
+                className="h-4 w-4 accent-[#0a1ae1]"
+                onChange={(event) => {
+                  setCaseSensitive(event.target.checked);
+                  setPage(1);
+                }}
+                type="checkbox"
+              />
+              区分大小写
+            </label>
+            <label className="flex h-10 cursor-pointer items-center gap-2 text-sm text-[#bfc9e7]/68">
+              <input
+                checked={prefixSearch}
+                className="h-4 w-4 accent-[#0a1ae1]"
+                onChange={(event) => {
+                  setPrefixSearch(event.target.checked);
+                  setPage(1);
+                }}
+                type="checkbox"
+              />
+              前缀模糊搜索
+            </label>
+          </div>
+
+          {filteredKeys.length === 0 ? (
+            <p className="py-12 text-center text-sm font-bold text-[#bfc9e7]/58">没有任何结果、确定配置了吗？</p>
+          ) : (
+            <>
+              <ol className="divide-y divide-white/8 border-b border-white/8">
+                {visibleKeys.map((key, index) => (
+                  <li className="grid min-h-11 grid-cols-[3rem_minmax(0,1fr)] items-center gap-3 py-2" key={key}>
+                    <span className="text-right font-mono text-xs tabular-nums text-[#bfc9e7]/38">{startIndex + index + 1}</span>
+                    <code className="break-all font-mono text-sm text-[#c7d0ef]">{key}</code>
+                  </li>
+                ))}
+              </ol>
+
+              <footer className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-[#bfc9e7]/48">
+                  显示 {startIndex + 1}-{Math.min(startIndex + environmentKeysPageSize, filteredKeys.length)}，共 {filteredKeys.length} 条
+                </p>
+                <nav aria-label={`${container.container_name} Key 分页`} className="flex items-center gap-1">
+                  <PaginationButton disabled={safePage === 1} label={`${container.container_name} 跳转到首页`} onClick={() => setPage(1)}>«</PaginationButton>
+                  <PaginationButton disabled={safePage === 1} label={`${container.container_name} 上一页`} onClick={() => setPage((current) => Math.max(1, current - 1))}>‹</PaginationButton>
+                  {pageNumbers[0] > 1 ? <span className="w-6 text-center text-xs text-[#bfc9e7]/36">…</span> : null}
+                  {pageNumbers.map((pageNumber) => (
+                    <button
+                      aria-current={pageNumber === safePage ? "page" : undefined}
+                      className={`h-8 min-w-8 border px-2 text-xs font-bold transition ${
+                        pageNumber === safePage
+                          ? "border-[#4b5fc6] bg-[#0a1ae1] text-white"
+                          : "border-white/10 bg-[#04050b] text-[#bfc9e7]/64 hover:border-[#4b5fc6]/60 hover:text-white"
+                      }`}
+                      key={pageNumber}
+                      onClick={() => setPage(pageNumber)}
+                      type="button"
+                    >
+                      {pageNumber}
+                    </button>
+                  ))}
+                  {pageNumbers.at(-1)! < totalPages ? <span className="w-6 text-center text-xs text-[#bfc9e7]/36">…</span> : null}
+                  <PaginationButton disabled={safePage === totalPages} label={`${container.container_name} 下一页`} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>›</PaginationButton>
+                  <PaginationButton disabled={safePage === totalPages} label={`${container.container_name} 跳转到末页`} onClick={() => setPage(totalPages)}>»</PaginationButton>
+                  <span className="ml-2 min-w-20 text-right text-xs tabular-nums text-[#bfc9e7]/48">{safePage} / {totalPages} 页</span>
+                </nav>
+              </footer>
+            </>
+          )}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function PaginationButton({
+  children,
+  disabled,
+  label,
+  onClick,
+}: {
+  children: React.ReactNode;
+  disabled: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label={label}
+      className="h-8 w-8 border border-white/10 bg-[#04050b] text-base text-[#bfc9e7]/68 transition hover:border-[#4b5fc6]/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+      disabled={disabled}
+      onClick={onClick}
+      title={label}
+      type="button"
+    >
+      {children}
+    </button>
+  );
+}
+
+function getVisiblePageNumbers(currentPage: number, totalPages: number): number[] {
+  const visibleCount = Math.min(5, totalPages);
+  const start = Math.max(1, Math.min(currentPage - 2, totalPages - visibleCount + 1));
+  return Array.from({ length: visibleCount }, (_, index) => start + index);
 }
 
 function ImageInventoryView() {
@@ -770,6 +1268,22 @@ async function fetchApi<T>(path: string, signal?: AbortSignal): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function fetchUserApi<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const session = readUserWebSession();
+  if (!session) {
+    throw new Error("用户端会话已失效，请重新登录");
+  }
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    headers: { Authorization: `Bearer ${session.access_token}` },
+    signal,
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail ?? `接口请求失败：${path}`);
+  }
+  return response.json() as Promise<T>;
+}
+
 function MiddlewareSystemView({
   activePage,
   onSetActivePage,
@@ -777,41 +1291,177 @@ function MiddlewareSystemView({
   activePage: MiddlewarePageKey;
   onSetActivePage: (page: MiddlewarePageKey) => void;
 }) {
+  const [nacosInstances, setNacosInstances] = useState<NacosInstanceOption[]>([]);
+  const [selectedNacosId, setSelectedNacosId] = useState("");
+  const [nacosCatalog, setNacosCatalog] = useState<NacosCatalog | null>(null);
+  const [selectedNamespaceId, setSelectedNamespaceId] = useState("");
+  const [nacosLoading, setNacosLoading] = useState(false);
+  const [nacosInstancesLoading, setNacosInstancesLoading] = useState(true);
+  const [nacosError, setNacosError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchUserApi<NacosInstanceOption[]>("/api/nacos/instances", controller.signal)
+      .then((items) => {
+        setNacosInstances(items);
+        setSelectedNacosId((current) => current || (items[0] ? String(items[0].id) : ""));
+      })
+      .catch((loadError) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") {
+          return;
+        }
+        setNacosError(loadError instanceof Error ? loadError.message : "Nacos 环境加载失败");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setNacosInstancesLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, []);
+
+  async function handleLoadNacosCatalog() {
+    if (!selectedNacosId) {
+      return;
+    }
+    setNacosLoading(true);
+    setNacosError("");
+    setNacosCatalog(null);
+    setSelectedNamespaceId("");
+    try {
+      const catalog = await fetchUserApi<NacosCatalog>(
+        `/api/nacos/instances/${selectedNacosId}/catalog`,
+      );
+      setNacosCatalog(catalog);
+      setSelectedNamespaceId(catalog.namespaces[0]?.namespace_id ?? "");
+    } catch (loadError) {
+      setNacosError(loadError instanceof Error ? loadError.message : "Nacos 配置目录获取失败");
+    } finally {
+      setNacosLoading(false);
+    }
+  }
+
   const pages: Array<{ key: MiddlewarePageKey; label: string; hint: string }> = [
-    { key: "nacosKeys", label: "Nacos key 获取", hint: "点击按钮请求后端 Codex 链路" },
+    { key: "nacosKeys", label: "Nacos 配置目录", hint: "Namespace、Group 与配置名称" },
     { key: "healthChecks", label: "数据库可用性校验", hint: "MySQL、Doris、Redis、Kafka" },
   ];
+  const selectedNamespace = nacosCatalog?.namespaces.find(
+    (namespace) => namespace.namespace_id === selectedNamespaceId,
+  ) ?? nacosCatalog?.namespaces[0];
 
   return (
     <div className="space-y-5">
       <SubPageNav activeKey={activePage} items={pages} onChange={onSetActivePage} />
 
       {activePage === "nacosKeys" ? (
-        <SectionBlock title="获取某个环境的 Nacos 所有 key" description="当前只是 mock 静态页面。后续研发点击按钮后，后端收到环境与服务信息，请求 Codex 再根据 skill 获取并隐藏所有 value，只返回 key 列表。">
+        <SectionBlock title="Nacos 配置目录" description="选择后台已登记的环境，查询 Namespace、Group、配置名称与格式。该页面不读取或展示配置内容。">
         <div className="grid gap-4 xl:grid-cols-[360px_1fr]">
           <div className="rounded-[6px] border border-white/10 bg-[#070b1b] p-4">
             <label className="block">
               <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">环境</span>
-              <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none">
-                <option>测试环境</option>
-                <option>开发环境</option>
-                <option>生产环境</option>
+              <select
+                className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none disabled:opacity-60"
+                disabled={nacosInstancesLoading || nacosInstances.length === 0}
+                onChange={(event) => {
+                  setSelectedNacosId(event.target.value);
+                  setNacosCatalog(null);
+                  setSelectedNamespaceId("");
+                  setNacosError("");
+                }}
+                value={selectedNacosId}
+              >
+                {nacosInstances.length === 0 ? <option value="">暂无已登记环境</option> : null}
+                {nacosInstances.map((instance) => (
+                  <option key={instance.id} value={instance.id}>
+                    {instance.environment_name}
+                  </option>
+                ))}
               </select>
             </label>
-            <label className="mt-4 block">
-              <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">服务</span>
-              <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none" readOnly value="ecmas-server" />
-            </label>
-            <button className="mt-5 h-10 w-full rounded-[6px] bg-[#0a1ae1] px-4 text-sm font-black text-white disabled:opacity-60" disabled type="button">
-              获取 Nacos key 列表
+            <button
+              className="mt-5 h-10 w-full rounded-[6px] bg-[#0a1ae1] px-4 text-sm font-black text-white disabled:opacity-60"
+              disabled={!selectedNacosId || nacosLoading || nacosInstancesLoading}
+              onClick={handleLoadNacosCatalog}
+              type="button"
+            >
+              {nacosLoading ? "正在获取配置目录..." : "获取 Namespace 与配置"}
             </button>
-            <p className="mt-3 text-xs leading-5 text-[#bfc9e7]/54">静态阶段按钮禁用，后续接入后端请求链路。</p>
+            <p className="mt-3 text-xs leading-5 text-[#bfc9e7]/54">
+              仅返回配置元数据，不返回配置正文及任何 value。
+            </p>
+            {nacosError ? <p className="mt-4 rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-3 py-3 text-sm text-[#ff9aa3]">{nacosError}</p> : null}
           </div>
-          <div>
-        <CompactTable
-          columns={["命名空间", "Group", "配置 key", "归属"]}
-          rows={nacosRows.map((row) => [row.namespace, row.group, row.key, row.owner])}
-        />
+          <div className="min-w-0">
+            {nacosInstancesLoading ? <p className="border border-white/10 px-4 py-10 text-center text-sm text-[#bfc9e7]/64">正在加载已登记的 Nacos 环境...</p> : null}
+            {!nacosInstancesLoading && nacosInstances.length === 0 && !nacosError ? <p className="border border-dashed border-white/14 px-4 py-10 text-center text-sm text-[#bfc9e7]/64">请先在后台管理页面添加 Nacos 连接信息。</p> : null}
+            {nacosLoading ? <p className="border border-white/10 px-4 py-10 text-center text-sm text-[#bfc9e7]/64">正在连接 Nacos 并读取配置目录...</p> : null}
+            {nacosCatalog && !nacosLoading ? (
+              <div className="border border-white/10 bg-[#070b1b]">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
+                  <div>
+                    <p className="text-sm font-black text-white">{nacosCatalog.instance.environment_name}</p>
+                    <p className="mt-1 text-xs text-[#bfc9e7]/54">{nacosCatalog.namespace_count} 个 Namespace，{nacosCatalog.config_count} 个配置</p>
+                  </div>
+                  <span className="text-xs font-bold text-[#7dd3fc]">已连接</span>
+                </div>
+                {nacosCatalog.namespaces.length > 0 ? (
+                  <div className="overflow-x-auto border-b border-white/10">
+                    <div className="flex w-max min-w-full gap-2 px-5 py-3" role="tablist" aria-label="Nacos Namespace">
+                      {nacosCatalog.namespaces.map((namespace) => {
+                        const active = namespace.namespace_id === selectedNamespace?.namespace_id;
+                        return (
+                          <button
+                            aria-selected={active}
+                            className={`min-w-24 flex-1 rounded-[6px] border px-3 py-3 text-left transition ${
+                              active
+                                ? "border-[#4b5fc6] bg-[#0a1ae1] text-white"
+                                : "border-white/10 bg-[#04050b] text-[#bfc9e7]/68 hover:border-[#4b5fc6]/60 hover:text-white"
+                            }`}
+                            key={namespace.namespace_id}
+                            onClick={() => setSelectedNamespaceId(namespace.namespace_id)}
+                            role="tab"
+                            type="button"
+                          >
+                            <span className="block truncate text-sm font-black" title={namespace.namespace_name}>{namespace.namespace_name}</span>
+                            <span className={`mt-1 block text-xs ${active ? "text-white/70" : "text-[#bfc9e7]/46"}`}>
+                              {namespace.config_count} 个配置
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+                {selectedNamespace ? (
+                  <section>
+                    <div className="flex items-center justify-between gap-3 px-5 py-4">
+                      <div>
+                        <h3 className="text-sm font-black text-white">{selectedNamespace.namespace_name}</h3>
+                        <p className="mt-1 font-mono text-xs text-[#bfc9e7]/46">{selectedNamespace.namespace_id}</p>
+                      </div>
+                      <span className="text-xs text-[#bfc9e7]/60">{selectedNamespace.config_count} 个配置</span>
+                    </div>
+                    <div className="overflow-x-auto px-5 pb-4">
+                      <table className="w-full min-w-[620px] text-left text-sm">
+                        <thead className="text-xs text-[#bfc9e7]/52">
+                          <tr className="border-b border-white/10"><th className="w-[28%] py-3 pr-4">Group</th><th className="py-3 pr-4">配置名称</th><th className="w-28 py-3">格式</th></tr>
+                        </thead>
+                        <tbody>
+                          {selectedNamespace.configs.map((config) => (
+                            <tr className="border-b border-white/8 text-[#bfc9e7]/78 last:border-b-0" key={`${config.group}-${config.data_id}`}>
+                              <td className="break-all py-3 pr-4 font-mono text-xs">{config.group}</td>
+                              <td className="break-all py-3 pr-4 font-mono text-xs font-bold text-[#9fb0ff]">{config.data_id}</td>
+                              <td className="py-3 text-xs uppercase">{config.type}</td>
+                            </tr>
+                          ))}
+                          {selectedNamespace.configs.length === 0 ? <tr><td className="py-6 text-center text-[#bfc9e7]/52" colSpan={3}>该 Namespace 暂无配置</td></tr> : null}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                ) : <p className="px-5 py-10 text-center text-sm text-[#bfc9e7]/52">该 Nacos 暂无 Namespace</p>}
+              </div>
+            ) : null}
           </div>
         </div>
         </SectionBlock>

@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS `machine_hosts` (
   `public_ip` VARCHAR(64) NOT NULL DEFAULT '',
   `private_ip` VARCHAR(64) NOT NULL DEFAULT '',
   `node_exporter_url` VARCHAR(512) NOT NULL,
+  `namespace_keys` JSON NULL,
   `status` ENUM('active','unreachable') NOT NULL DEFAULT 'unreachable',
   `last_error` TEXT NULL,
   `last_seen_at` DATETIME NULL,
@@ -149,6 +150,28 @@ CREATE TABLE IF NOT EXISTS `k8s_clusters` (
   CONSTRAINT `fk_k8s_clusters_environment` FOREIGN KEY (`environment_id`) REFERENCES `infra_environments` (`id`) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `middleware_instances` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `environment_id` BIGINT UNSIGNED NOT NULL,
+  `middleware_type` VARCHAR(32) NOT NULL,
+  `instance_name` VARCHAR(128) NOT NULL,
+  `base_url` VARCHAR(512) NOT NULL,
+  `username` VARCHAR(255) NOT NULL,
+  `password_ciphertext` VARBINARY(4096) NOT NULL,
+  `password_nonce` VARBINARY(12) NOT NULL,
+  `status` ENUM('configured','active','unreachable','disabled') NOT NULL DEFAULT 'configured',
+  `last_error` TEXT NULL,
+  `last_seen_at` DATETIME NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_middleware_instances_type_url` (`middleware_type`, `base_url`),
+  KEY `idx_middleware_instances_environment_id` (`environment_id`),
+  KEY `idx_middleware_instances_status` (`status`),
+  CONSTRAINT `fk_middleware_instances_environment`
+    FOREIGN KEY (`environment_id`) REFERENCES `infra_environments` (`id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 INSERT INTO `rbac_roles` (`code`, `name`, `description`, `is_system`, `is_active`)
 VALUES ('super_admin', '超级管理员', '拥有平台全部权限', 1, 1)
 ON DUPLICATE KEY UPDATE `name` = VALUES(`name`), `is_active` = 1;
@@ -169,7 +192,13 @@ VALUES
   ('k8s:cluster:list', '查看 K8S 集群', 'api', '查看环境下的 K8S 集群', 1),
   ('k8s:cluster:create', '登记 K8S 集群', 'api', '登记 K8S API 与 kubeconfig 引用', 1),
   ('k8s:cluster:delete', '删除 K8S 集群', 'api', '删除 K8S 集群登记信息', 1),
-  ('k8s:image:list', '查看 K8S 镜像', 'api', '查看 namespace 下工作负载使用的镜像', 1)
+  ('k8s:nodeport:list', '查看 K8S NodePort', 'api', '查看 namespace 下普通用户可见的 NodePort 公网调用地址', 1),
+  ('k8s:image:list', '查看 K8S 镜像', 'api', '查看 namespace 下工作负载使用的镜像', 1),
+  ('k8s:env:list', '查看 K8S 环境变量 Key', 'api', '查看白名单 namespace 下容器运行时环境变量名称', 1),
+  ('middleware:list', '查看中间件实例', 'api', '查看已登记的中间件实例', 1),
+  ('middleware:create', '添加中间件实例', 'api', '登记中间件连接信息', 1),
+  ('middleware:delete', '删除中间件实例', 'api', '删除中间件连接信息', 1),
+  ('nacos:catalog:list', '查看 Nacos 配置目录', 'api', '查看 Nacos 命名空间、Group、DataId 和配置格式', 1)
 ON DUPLICATE KEY UPDATE `name` = VALUES(`name`), `is_active` = 1;
 
 INSERT INTO `rbac_users` (`username`, `password_hash`, `display_name`, `email`, `is_active`, `is_superuser`)

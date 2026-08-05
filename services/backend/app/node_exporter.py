@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import logging
 import re
+import socket
+import ssl
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.error import URLError
+from http.client import InvalidURL
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
 
 METRICS_TIMEOUT_SECONDS = 8
 CPU_USAGE_SAMPLE_SECONDS = 1.0
+logger = logging.getLogger("infraops.node_exporter")
 
 
 @dataclass(frozen=True)
@@ -47,12 +52,21 @@ def scrape_node_exporter(raw_url: str, include_cpu_usage: bool = False) -> Scrap
     try:
         content = fetch_metrics(url)
         if not has_node_exporter_metrics(content):
+            error = describe_metrics_content_error(content)
+            logger.warning(
+                "node-exporter 指标校验失败",
+                extra={
+                    "event": "node_exporter_metrics_invalid",
+                    "target_url": url,
+                    "error_type": "UnexpectedMetrics",
+                },
+            )
             return ScrapeResult(
                 status="unreachable",
                 normalized_url=url,
                 hostname="",
                 public_ip=public_ip,
-                error="metrics 内容不是 node-exporter：缺少主机 CPU、内存、磁盘等 node_* 指标",
+                error=error,
                 metrics=None,
             )
         cpu_usage = None
@@ -63,24 +77,42 @@ def scrape_node_exporter(raw_url: str, include_cpu_usage: bool = False) -> Scrap
             time.sleep(CPU_USAGE_SAMPLE_SECONDS)
             content = fetch_metrics(url)
             if not has_node_exporter_metrics(content):
+                error = describe_metrics_content_error(content)
+                logger.warning(
+                    "node-exporter 指标校验失败",
+                    extra={
+                        "event": "node_exporter_metrics_invalid",
+                        "target_url": url,
+                        "error_type": "UnexpectedMetrics",
+                    },
+                )
                 return ScrapeResult(
                     status="unreachable",
                     normalized_url=url,
                     hostname="",
                     public_ip=public_ip,
-                    error="metrics 内容不是 node-exporter：缺少主机 CPU、内存、磁盘等 node_* 指标",
+                    error=error,
                     metrics=None,
                 )
             sample_seconds = time.monotonic() - start
             second_cpu_seconds = collect_cpu_mode_seconds(content)
             cpu_usage = calculate_cpu_usage_percent(first_cpu_seconds, second_cpu_seconds)
-    except (OSError, URLError, TimeoutError) as exc:
+    except (OSError, URLError, TimeoutError, ValueError, InvalidURL) as exc:
+        error = describe_connection_error(exc)
+        logger.warning(
+            "node-exporter 探测失败",
+            extra={
+                "event": "node_exporter_probe_failed",
+                "target_url": url,
+                "error_type": type(exc).__name__,
+            },
+        )
         return ScrapeResult(
             status="unreachable",
             normalized_url=url,
             hostname="",
             public_ip=public_ip,
-            error=f"{type(exc).__name__}: {exc}",
+            error=error,
             metrics=None,
         )
 
@@ -88,6 +120,10 @@ def scrape_node_exporter(raw_url: str, include_cpu_usage: bool = False) -> Scrap
     if cpu_usage is not None:
         metrics["cpu"]["usagePercent"] = cpu_usage
         metrics["cpu"]["sampleSeconds"] = round(sample_seconds, 2)
+    logger.debug(
+        "node-exporter 探测成功",
+        extra={"event": "node_exporter_probe_succeeded", "target_url": url},
+    )
     return ScrapeResult(
         status="active",
         normalized_url=url,
@@ -103,6 +139,27 @@ def fetch_metrics(url: str) -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
+def describe_connection_error(exc: Exception) -> str:
+    if isinstance(exc, HTTPError):
+        return f"HTTP {exc.code}：node-exporter 返回了异常状态码"
+
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    error_number = getattr(reason, "errno", None)
+    if isinstance(reason, (TimeoutError, socket.timeout)) or error_number in {60, 110, 10060}:
+        return "连接超时：请检查目标地址、端口、安全组、防火墙和网络路由"
+    if isinstance(reason, ConnectionRefusedError) or error_number in {61, 111, 10061}:
+        return "连接被拒绝：目标端口未监听，或被防火墙主动拒绝"
+    if isinstance(reason, socket.gaierror) or error_number in {-3, -2, 11001}:
+        return "域名解析失败：请检查 node-exporter 地址是否正确"
+    if isinstance(reason, ssl.SSLError):
+        return "TLS 连接失败：请检查 HTTPS 配置和证书"
+    if isinstance(reason, (InvalidURL, ValueError)):
+        return "URL 格式错误：请输入有效的 node-exporter 地址"
+
+    detail = " ".join(str(reason).split())[:300]
+    return f"连接失败（{type(reason).__name__}）：{detail or '未返回详细原因'}"
+
+
 def has_node_exporter_metrics(content: str) -> bool:
     required_metric_names = (
         "node_cpu_seconds_total",
@@ -110,6 +167,20 @@ def has_node_exporter_metrics(content: str) -> bool:
         "node_filesystem_size_bytes",
     )
     return any(metric_name in content for metric_name in required_metric_names)
+
+
+def describe_metrics_content_error(content: str) -> str:
+    prometheus_metrics = (
+        "prometheus_build_info",
+        "prometheus_engine_queries",
+        "prometheus_tsdb_head_series",
+    )
+    if any(metric_name in content for metric_name in prometheus_metrics):
+        return (
+            "当前地址返回的是 Prometheus 服务自身指标，不是 node-exporter；"
+            "请填写目标主机的 node-exporter :9100/metrics 地址"
+        )
+    return "metrics 内容不是 node-exporter：缺少主机 CPU、内存、磁盘等 node_* 指标"
 
 
 def parse_metrics(content: str) -> dict:

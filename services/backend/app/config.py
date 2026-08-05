@@ -25,6 +25,19 @@ class Settings:
     k8s_connect_timeout_seconds: int = int(os.getenv("K8S_CONNECT_TIMEOUT_SECONDS", "5"))
     k8s_read_timeout_seconds: int = int(os.getenv("K8S_READ_TIMEOUT_SECONDS", "20"))
     k8s_credential_encryption_key: str = os.getenv("K8S_CREDENTIAL_ENCRYPTION_KEY", "")
+    middleware_credential_encryption_key: str = os.getenv(
+        "MIDDLEWARE_CREDENTIAL_ENCRYPTION_KEY", ""
+    )
+    nacos_connect_timeout_seconds: int = int(
+        os.getenv("NACOS_CONNECT_TIMEOUT_SECONDS", "5")
+    )
+    nacos_read_timeout_seconds: int = int(
+        os.getenv("NACOS_READ_TIMEOUT_SECONDS", "15")
+    )
+    log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_dir: str = os.getenv("LOG_DIR", ".local/logs")
+    log_file_max_bytes: int = int(os.getenv("LOG_FILE_MAX_BYTES", str(10 * 1024 * 1024)))
+    log_file_backup_count: int = int(os.getenv("LOG_FILE_BACKUP_COUNT", "5"))
     cors_origins: tuple[str, ...] = (
         "http://localhost:3000",
         "http://localhost:3001",
