@@ -9,3 +9,4 @@ redis>=5.2,<6
 kubernetes>=36.0.3,<37
 cryptography>=49,<50
 httpx>=0.28,<0.29
+PyYAML>=6.0,<7

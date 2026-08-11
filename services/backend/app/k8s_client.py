@@ -1,8 +1,12 @@
+import json
+from datetime import datetime, timezone
+
 from cryptography.exceptions import InvalidTag
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 from kubernetes.config.config_exception import ConfigException
 from kubernetes.stream import stream
+from kubernetes.utils.quantity import parse_quantity
 from urllib3.exceptions import HTTPError as Urllib3HTTPError
 from websocket import WebSocketException
 import yaml
@@ -13,6 +17,60 @@ from .credential_crypto import CredentialConfigurationError, decrypt_credential
 
 class K8sIntegrationError(RuntimeError):
     pass
+
+
+PROMETHEUS_NODE_QUERIES = {
+    "uname": "node_uname_info",
+    "cpu_usage": (
+        '100 * (1 - avg by(instance) '
+        '(rate(node_cpu_seconds_total{mode="idle"}[5m])))'
+    ),
+    "cpu_cores": 'count by(instance) (node_cpu_seconds_total{mode="idle"})',
+    "memory_total": "node_memory_MemTotal_bytes",
+    "memory_available": "node_memory_MemAvailable_bytes",
+    "root_size": (
+        'node_filesystem_size_bytes{mountpoint="/",'
+        'fstype!~"tmpfs|overlay|squashfs"}'
+    ),
+    "root_available": (
+        'node_filesystem_avail_bytes{mountpoint="/",'
+        'fstype!~"tmpfs|overlay|squashfs"}'
+    ),
+}
+
+
+def get_cluster_node_resources(cluster: dict) -> dict:
+    try:
+        with _api_client(cluster) as api_client:
+            core_api = client.CoreV1Api(api_client)
+            nodes = core_api.list_node(
+                _request_timeout=_request_timeout(),
+            ).items
+            services = core_api.list_service_for_all_namespaces(
+                _request_timeout=_request_timeout(),
+            ).items
+            prometheus = _select_prometheus_service(services)
+            vectors = {
+                key: _prometheus_query(api_client, prometheus, query)
+                for key, query in PROMETHEUS_NODE_QUERIES.items()
+            }
+            node_resources = _merge_node_resources(nodes, vectors)
+            node_resources = _fill_missing_nodes_from_kubelet(
+                api_client, nodes, node_resources
+            )
+    except K8sIntegrationError:
+        raise
+    except _K8S_ERRORS as exc:
+        raise K8sIntegrationError(_safe_error(exc)) from exc
+
+    return {
+        "scraped_at": datetime.now(timezone.utc).isoformat(),
+        "prometheus": {
+            "namespace": prometheus["namespace"],
+            "service_name": prometheus["service_name"],
+        },
+        "nodes": node_resources,
+    }
 
 
 def list_namespaces(cluster: dict) -> list[str]:
@@ -373,6 +431,318 @@ def get_workload_environment_keys(
         "pod_name": pod.metadata.name,
         "containers": containers,
     }
+
+
+def _select_prometheus_service(services: list) -> dict:
+    candidates = []
+    excluded_names = {
+        "alertmanager",
+        "exporter",
+        "grafana",
+        "operator",
+        "pushgateway",
+        "state-metrics",
+    }
+    for service in services:
+        metadata = getattr(service, "metadata", None)
+        spec = getattr(service, "spec", None)
+        name = str(getattr(metadata, "name", "") or "")
+        namespace = str(getattr(metadata, "namespace", "") or "")
+        labels = getattr(metadata, "labels", None) or {}
+        cluster_ip = str(getattr(spec, "cluster_ip", "") or "")
+        if not name or not namespace or cluster_ip.lower() == "none":
+            continue
+        normalized_name = name.lower()
+        if "prometheus" not in normalized_name:
+            continue
+        if any(excluded in normalized_name for excluded in excluded_names):
+            continue
+
+        for port in getattr(spec, "ports", None) or []:
+            port_name = str(getattr(port, "name", "") or "")
+            port_number = int(getattr(port, "port", 0) or 0)
+            if not port_name and not port_number:
+                continue
+            score = 0
+            if labels.get("app.kubernetes.io/name") == "prometheus":
+                score += 100
+            if normalized_name.endswith("-prometheus"):
+                score += 80
+            if port_number == 9090:
+                score += 40
+            if port_name in {"http-web", "web", "http"}:
+                score += 30
+            if namespace in {"monitoring", "observe", "prometheus"}:
+                score += 10
+            if score < 40:
+                continue
+            candidates.append(
+                (
+                    score,
+                    namespace,
+                    name,
+                    {
+                        "namespace": namespace,
+                        "service_name": name,
+                        "port": port_name or str(port_number),
+                        "scheme": "https" if port_name.startswith("https") else "http",
+                    },
+                )
+            )
+
+    if not candidates:
+        raise K8sIntegrationError(
+            "集群中未发现可通过 K8S API 代理访问的 Prometheus Service"
+        )
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return candidates[0][3]
+
+
+def _prometheus_query(api_client, prometheus: dict, query: str) -> list[dict]:
+    service_proxy_name = (
+        f'{prometheus["scheme"]}:{prometheus["service_name"]}:'
+        f'{prometheus["port"]}'
+    )
+    resource_path = (
+        f'/api/v1/namespaces/{prometheus["namespace"]}/services/'
+        f"{service_proxy_name}/proxy/api/v1/query"
+    )
+    raw_response = api_client.call_api(
+        resource_path,
+        "GET",
+        query_params=[("query", query)],
+        response_types_map={200: "object"},
+        auth_settings=["BearerToken"],
+        _return_http_data_only=True,
+        _request_timeout=_request_timeout(),
+    )
+    try:
+        if isinstance(raw_response, (bytes, bytearray)):
+            payload = json.loads(bytes(raw_response).decode("utf-8"))
+        elif isinstance(raw_response, str):
+            payload = json.loads(raw_response)
+        else:
+            payload = raw_response
+    except (TypeError, ValueError) as exc:
+        raise K8sIntegrationError("Prometheus 返回了无法解析的响应") from exc
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        raise K8sIntegrationError("Prometheus 查询失败")
+    result = payload.get("data", {}).get("result", [])
+    if not isinstance(result, list):
+        raise K8sIntegrationError("Prometheus 指标响应格式无效")
+    return result
+
+
+def _merge_node_resources(nodes: list, vectors: dict[str, list[dict]]) -> list[dict]:
+    uname_by_node = {}
+    for row in vectors.get("uname", []):
+        metric = row.get("metric", {})
+        nodename = str(metric.get("nodename") or "")
+        instance = str(metric.get("instance") or "")
+        if nodename and instance:
+            uname_by_node[nodename] = instance
+
+    values = {
+        key: _vector_values(rows)
+        for key, rows in vectors.items()
+        if key != "uname"
+    }
+    result = []
+    for node in nodes:
+        metadata = getattr(node, "metadata", None)
+        status = getattr(node, "status", None)
+        node_name = str(getattr(metadata, "name", "") or "")
+        if not node_name:
+            continue
+        addresses = {
+            str(getattr(address, "type", "") or ""): str(
+                getattr(address, "address", "") or ""
+            )
+            for address in getattr(status, "addresses", None) or []
+        }
+        instance = uname_by_node.get(node_name)
+        if not instance and addresses.get("InternalIP"):
+            internal_ip = addresses["InternalIP"]
+            instance = next(
+                (
+                    candidate
+                    for candidate in values.get("memory_total", {})
+                    if candidate.split(":", 1)[0] == internal_ip
+                ),
+                None,
+            )
+        ready = any(
+            getattr(condition, "type", None) == "Ready"
+            and getattr(condition, "status", None) == "True"
+            for condition in getattr(status, "conditions", None) or []
+        )
+        cpu_cores = _metric_value(values, "cpu_cores", instance)
+        memory_total = _metric_value(values, "memory_total", instance)
+        memory_available = _metric_value(values, "memory_available", instance)
+        root_total = _metric_value(values, "root_size", instance)
+        root_available = _metric_value(values, "root_available", instance)
+        metrics_available = bool(instance and cpu_cores and memory_total and root_total)
+        memory_used = max(memory_total - memory_available, 0.0)
+        root_used = max(root_total - root_available, 0.0)
+        result.append(
+            {
+                "name": node_name,
+                "ready": ready,
+                "internal_ip": addresses.get("InternalIP") or None,
+                "external_ip": addresses.get("ExternalIP") or None,
+                "metrics_available": metrics_available,
+                "metrics_error": (
+                    None
+                    if metrics_available
+                    else "Prometheus 尚未采集该节点的完整 node-exporter 指标"
+                ),
+                "cpu": {
+                    "coreCount": int(cpu_cores),
+                    "usagePercent": round(
+                        _metric_value(values, "cpu_usage", instance), 2
+                    ),
+                    "window": "5m",
+                },
+                "memory": _capacity_metrics(memory_total, memory_used, memory_available),
+                "rootDisk": _capacity_metrics(root_total, root_used, root_available),
+            }
+        )
+    return sorted(result, key=lambda item: item["name"])
+
+
+def apply_single_node_exporter_fallback(
+    nodes: list[dict], exporter_metrics: dict
+) -> list[dict]:
+    if len(nodes) != 1 or nodes[0].get("metrics_available"):
+        return nodes
+
+    node = nodes[0]
+    return [
+        {
+            **node,
+            "metrics_available": True,
+            "metrics_error": None,
+            "cpu": {
+                **exporter_metrics["cpu"],
+                "window": "sample",
+            },
+            "memory": exporter_metrics["memory"],
+            "rootDisk": exporter_metrics["rootDisk"],
+        }
+    ]
+
+
+def _fill_missing_nodes_from_kubelet(
+    api_client, nodes: list, node_resources: list[dict]
+) -> list[dict]:
+    nodes_by_name = {
+        str(getattr(getattr(node, "metadata", None), "name", "") or ""): node
+        for node in nodes
+    }
+    result = []
+    for resource in node_resources:
+        if resource.get("metrics_available"):
+            result.append(resource)
+            continue
+        node = nodes_by_name.get(resource["name"])
+        if node is None:
+            result.append(resource)
+            continue
+        try:
+            summary = api_client.call_api(
+                f'/api/v1/nodes/{resource["name"]}/proxy/stats/summary',
+                "GET",
+                response_types_map={200: "object"},
+                auth_settings=["BearerToken"],
+                _return_http_data_only=True,
+                _request_timeout=_request_timeout(),
+            )
+            result.append(_resource_from_kubelet_summary(resource, node, summary))
+        except _K8S_ERRORS:
+            result.append(resource)
+    return result
+
+
+def _resource_from_kubelet_summary(resource: dict, node, summary: dict) -> dict:
+    node_summary = summary.get("node", {}) if isinstance(summary, dict) else {}
+    cpu_summary = node_summary.get("cpu", {})
+    memory_summary = node_summary.get("memory", {})
+    filesystem_summary = node_summary.get("fs", {})
+    capacity = getattr(getattr(node, "status", None), "capacity", None) or {}
+    core_count = int(parse_quantity(str(capacity.get("cpu", "0"))))
+    memory_total = float(parse_quantity(str(capacity.get("memory", "0"))))
+    cpu_used_cores = float(cpu_summary.get("usageNanoCores") or 0) / 1_000_000_000
+    memory_available = float(memory_summary.get("availableBytes") or 0)
+    root_total = float(filesystem_summary.get("capacityBytes") or 0)
+    root_available = float(filesystem_summary.get("availableBytes") or 0)
+    if not core_count or not memory_total or not root_total:
+        return resource
+
+    return {
+        **resource,
+        "metrics_available": True,
+        "metrics_error": None,
+        "cpu": {
+            "coreCount": core_count,
+            "usagePercent": round(cpu_used_cores / core_count * 100, 2),
+            "window": "sample",
+        },
+        "memory": _capacity_metrics(
+            memory_total,
+            max(memory_total - memory_available, 0.0),
+            memory_available,
+        ),
+        "rootDisk": _capacity_metrics(
+            root_total,
+            max(root_total - root_available, 0.0),
+            root_available,
+        ),
+    }
+
+
+def _vector_values(rows: list[dict]) -> dict[str, float]:
+    values = {}
+    for row in rows:
+        instance = str(row.get("metric", {}).get("instance") or "")
+        sample = row.get("value", [])
+        if not instance or not isinstance(sample, list) or len(sample) < 2:
+            continue
+        try:
+            value = float(sample[1])
+        except (TypeError, ValueError):
+            continue
+        values[instance] = max(values.get(instance, value), value)
+    return values
+
+
+def _metric_value(
+    values: dict[str, dict[str, float]], key: str, instance: str | None
+) -> float:
+    if not instance:
+        return 0.0
+    return values.get(key, {}).get(instance, 0.0)
+
+
+def _capacity_metrics(total: float, used: float, available: float) -> dict:
+    return {
+        "totalBytes": int(total),
+        "usedBytes": int(used),
+        "availableBytes": int(available),
+        "usagePercent": round((used / total * 100) if total else 0.0, 2),
+        "totalHuman": _format_bytes(total),
+        "usedHuman": _format_bytes(used),
+        "availableHuman": _format_bytes(available),
+    }
+
+
+def _format_bytes(value: float) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+    size = float(value)
+    for unit in units:
+        if abs(size) < 1024 or unit == units[-1]:
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PiB"
 
 
 _K8S_ERRORS = (

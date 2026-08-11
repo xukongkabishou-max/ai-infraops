@@ -11,18 +11,44 @@ from .credential_crypto import CredentialConfigurationError
 
 
 AAD = b"ai-infraops:middleware-password:v1"
+DORIS_ACCOUNT_AAD = b"ai-infraops:doris-account-password:v1"
+MYSQL_ACCOUNT_AAD = b"ai-infraops:mysql-account-password:v1"
 DERIVATION_INFO = b"ai-infraops:middleware-password-key:v1"
 
 
 def encrypt_middleware_password(password: str) -> tuple[bytes, bytes]:
+    return _encrypt_password(password, AAD)
+
+
+def encrypt_doris_account_password(password: str) -> tuple[bytes, bytes]:
+    return _encrypt_password(password, DORIS_ACCOUNT_AAD)
+
+
+def encrypt_mysql_account_password(password: str) -> tuple[bytes, bytes]:
+    return _encrypt_password(password, MYSQL_ACCOUNT_AAD)
+
+
+def _encrypt_password(password: str, aad: bytes) -> tuple[bytes, bytes]:
     nonce = os.urandom(12)
     ciphertext = AESGCM(_encryption_key()).encrypt(
-        nonce, password.encode("utf-8"), AAD
+        nonce, password.encode("utf-8"), aad
     )
     return ciphertext, nonce
 
 
 def decrypt_middleware_password(ciphertext: bytes, nonce: bytes) -> str:
+    return _decrypt_password(ciphertext, nonce, AAD)
+
+
+def decrypt_doris_account_password(ciphertext: bytes, nonce: bytes) -> str:
+    return _decrypt_password(ciphertext, nonce, DORIS_ACCOUNT_AAD)
+
+
+def decrypt_mysql_account_password(ciphertext: bytes, nonce: bytes) -> str:
+    return _decrypt_password(ciphertext, nonce, MYSQL_ACCOUNT_AAD)
+
+
+def _decrypt_password(ciphertext: bytes, nonce: bytes, aad: bytes) -> str:
     keys = [_encryption_key()]
     if (
         settings.middleware_credential_encryption_key.strip()
@@ -33,7 +59,7 @@ def decrypt_middleware_password(ciphertext: bytes, nonce: bytes) -> str:
             keys.append(legacy_key)
     for key in keys:
         try:
-            plaintext = AESGCM(key).decrypt(nonce, ciphertext, AAD)
+            plaintext = AESGCM(key).decrypt(nonce, ciphertext, aad)
             return plaintext.decode("utf-8")
         except InvalidTag:
             continue

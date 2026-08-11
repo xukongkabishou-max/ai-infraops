@@ -34,6 +34,22 @@ class Settings:
     nacos_read_timeout_seconds: int = int(
         os.getenv("NACOS_READ_TIMEOUT_SECONDS", "15")
     )
+    doris_connect_timeout_seconds: int = int(
+        os.getenv("DORIS_CONNECT_TIMEOUT_SECONDS", "5")
+    )
+    doris_read_timeout_seconds: int = int(
+        os.getenv("DORIS_READ_TIMEOUT_SECONDS", "15")
+    )
+    linux_agent_token: str = os.getenv("LINUX_AGENT_TOKEN", "")
+    linux_agent_connect_timeout_seconds: int = int(
+        os.getenv("LINUX_AGENT_CONNECT_TIMEOUT_SECONDS", "5")
+    )
+    linux_agent_read_timeout_seconds: int = int(
+        os.getenv("LINUX_AGENT_READ_TIMEOUT_SECONDS", "10")
+    )
+    linux_agent_tls_verify: bool = os.getenv(
+        "LINUX_AGENT_TLS_VERIFY", "true"
+    ).lower() in {"1", "true", "yes"}
     log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
     log_dir: str = os.getenv("LOG_DIR", ".local/logs")
     log_file_max_bytes: int = int(os.getenv("LOG_FILE_MAX_BYTES", str(10 * 1024 * 1024)))

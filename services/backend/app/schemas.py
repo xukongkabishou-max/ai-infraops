@@ -1,13 +1,14 @@
-from urllib.parse import urlsplit, urlunsplit
 import re
+from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
-    client_type: str = Field(default="user_web", min_length=1, max_length=64)
+    client_type: Literal["user_web", "backend_admin_web"] = "user_web"
 
 
 class LoginResponse(BaseModel):
@@ -23,11 +24,12 @@ class LoginResponse(BaseModel):
 
 class SessionRequest(BaseModel):
     access_token: str = Field(min_length=1, max_length=256)
-    client_type: str = Field(min_length=1, max_length=64)
+    client_type: Literal["user_web", "backend_admin_web"]
 
 
 class HostCreateRequest(BaseModel):
     node_exporter_url: str = Field(min_length=1, max_length=512)
+    linux_agent_url: str = Field(default="", max_length=512)
     hostname: str = Field(min_length=1, max_length=128)
     public_ip: str = Field(default="", max_length=64)
     private_ip: str = Field(default="", max_length=64)
@@ -36,6 +38,11 @@ class HostCreateRequest(BaseModel):
     k8s_credential_name: str = Field(default="", max_length=255)
     k8s_credential_content: str = Field(default="", max_length=1_000_000)
     namespace_keys: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("linux_agent_url")
+    @classmethod
+    def normalize_linux_agent_url(cls, value: str) -> str:
+        return _normalize_linux_agent_url(value)
 
     @field_validator("namespace_keys")
     @classmethod
@@ -66,34 +73,166 @@ class K8sClusterCreateRequest(BaseModel):
 
 
 class MiddlewareInstanceCreateRequest(BaseModel):
+    middleware_type: Literal["nacos", "doris", "mysql"] = "nacos"
     environment_name: str = Field(min_length=1, max_length=128)
+    instance_name: str = Field(default="", max_length=128)
     base_url: str = Field(min_length=1, max_length=512)
+    exporter_url: str = Field(default="", max_length=512)
     username: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=1, max_length=2048)
 
-    @field_validator("environment_name", "username", "password")
+    @field_validator(
+        "environment_name", "instance_name", "exporter_url", "username", "password"
+    )
     @classmethod
-    def strip_required_text(cls, value: str) -> str:
+    def strip_text(cls, value: str, info) -> str:
         stripped = value.strip()
+        if info.field_name != "instance_name" and not stripped:
+            raise ValueError("字段不能为空")
+        return stripped
+
+    @model_validator(mode="after")
+    def normalize_connection_address(self):
+        if self.middleware_type == "nacos":
+            self.base_url = _normalize_nacos_url(self.base_url)
+            self.exporter_url = ""
+        elif self.middleware_type == "doris":
+            self.base_url = _normalize_doris_address(self.base_url)
+            self.exporter_url = ""
+        else:
+            self.base_url = _normalize_mysql_address(self.base_url)
+            if not self.exporter_url:
+                raise ValueError("MySQL 实例必须填写 mysql-exporter URL")
+            self.exporter_url = _normalize_exporter_url(self.exporter_url)
+        return self
+
+
+class NacosConfigStructureRequest(BaseModel):
+    namespace_id: str = Field(default="public", max_length=255)
+    group: str = Field(min_length=1, max_length=255)
+    data_id: str = Field(min_length=1, max_length=255)
+    config_type: Literal["yaml", "yml", "json"]
+
+    @field_validator("namespace_id", "group", "data_id", "config_type")
+    @classmethod
+    def strip_config_identifier(cls, value: str, info) -> str:
+        stripped = value.strip()
+        if info.field_name == "namespace_id":
+            return stripped or "public"
         if not stripped:
             raise ValueError("字段不能为空")
         return stripped
 
-    @field_validator("base_url")
-    @classmethod
-    def normalize_base_url(cls, value: str) -> str:
-        stripped = value.strip()
-        parts = urlsplit(stripped)
-        if parts.scheme not in {"http", "https"} or not parts.hostname:
-            raise ValueError("Nacos URL 必须是完整的 HTTP 或 HTTPS 地址")
-        if parts.username or parts.password:
-            raise ValueError("Nacos URL 不允许包含用户名或密码")
-        if parts.query or parts.fragment:
-            raise ValueError("Nacos URL 不允许包含查询参数或锚点")
-        try:
-            parts.port
-        except ValueError as exc:
-            raise ValueError("Nacos URL 端口无效") from exc
-        return urlunsplit(
-            (parts.scheme.lower(), parts.netloc, parts.path.rstrip("/"), "", "")
-        )
+
+class DorisPasswordVerifyRequest(BaseModel):
+    user_identity: str = Field(min_length=1, max_length=512)
+    password: str = Field(min_length=1, max_length=2048)
+
+
+class DorisPasswordResetRequest(BaseModel):
+    user_identity: str = Field(min_length=1, max_length=512)
+    password: str = Field(min_length=1, max_length=2048)
+
+
+class DorisManagedPasswordRequest(BaseModel):
+    user_identity: str = Field(min_length=1, max_length=512)
+    purpose: Literal["view", "copy"]
+
+
+class DorisManagedPasswordSaveRequest(BaseModel):
+    user_identity: str = Field(min_length=1, max_length=512)
+    password: str = Field(min_length=1, max_length=2048)
+
+
+def _normalize_nacos_url(value: str) -> str:
+    parts = urlsplit(value.strip())
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("Nacos URL 必须是完整的 HTTP 或 HTTPS 地址")
+    if parts.username or parts.password:
+        raise ValueError("Nacos URL 不允许包含用户名或密码")
+    if parts.query or parts.fragment:
+        raise ValueError("Nacos URL 不允许包含查询参数或锚点")
+    try:
+        parts.port
+    except ValueError as exc:
+        raise ValueError("Nacos URL 端口无效") from exc
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc, parts.path.rstrip("/"), "", "")
+    )
+
+
+def _normalize_doris_address(value: str) -> str:
+    raw_value = value.strip()
+    parts = urlsplit(raw_value if "://" in raw_value else f"mysql://{raw_value}")
+    if parts.scheme != "mysql" or not parts.hostname:
+        raise ValueError("Doris FE 地址必须使用 host:port 格式")
+    if parts.username or parts.password:
+        raise ValueError("Doris FE 地址不允许包含用户名或密码")
+    if parts.path not in {"", "/"} or parts.query or parts.fragment:
+        raise ValueError("Doris FE 地址不允许包含路径、查询参数或锚点")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("Doris FE 查询端口无效") from exc
+    if port is None or not 1 <= port <= 65535:
+        raise ValueError("Doris FE 地址必须包含有效查询端口")
+    host = parts.hostname
+    normalized_host = f"[{host}]" if ":" in host else host
+    return f"mysql://{normalized_host}:{port}"
+
+
+def _normalize_mysql_address(value: str) -> str:
+    raw_value = value.strip()
+    parts = urlsplit(raw_value if "://" in raw_value else f"mysql://{raw_value}")
+    if parts.scheme != "mysql" or not parts.hostname:
+        raise ValueError("MySQL 地址必须使用 host:port 格式")
+    if parts.username or parts.password:
+        raise ValueError("MySQL 地址不允许包含用户名或密码")
+    if parts.path not in {"", "/"} or parts.query or parts.fragment:
+        raise ValueError("MySQL 地址不允许包含路径、查询参数或锚点")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("MySQL 连接端口无效") from exc
+    if port is None or not 1 <= port <= 65535:
+        raise ValueError("MySQL 地址必须包含有效连接端口")
+    host = parts.hostname
+    normalized_host = f"[{host}]" if ":" in host else host
+    return f"mysql://{normalized_host}:{port}"
+
+
+def _normalize_exporter_url(value: str) -> str:
+    parts = urlsplit(value.strip())
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("mysql-exporter URL 必须是完整的 HTTP 或 HTTPS 地址")
+    if parts.username or parts.password:
+        raise ValueError("mysql-exporter URL 不允许包含用户名或密码")
+    if parts.query or parts.fragment:
+        raise ValueError("mysql-exporter URL 不允许包含查询参数或锚点")
+    try:
+        parts.port
+    except ValueError as exc:
+        raise ValueError("mysql-exporter URL 端口无效") from exc
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc, parts.path.rstrip("/"), "", "")
+    )
+
+
+def _normalize_linux_agent_url(value: str) -> str:
+    raw_value = value.strip()
+    if not raw_value:
+        return ""
+    parts = urlsplit(raw_value)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("主机用户管理地址必须是完整的 HTTP 或 HTTPS 地址")
+    if parts.username or parts.password:
+        raise ValueError("主机用户管理地址不允许包含用户名或密码")
+    if parts.path not in {"", "/"} or parts.query or parts.fragment:
+        raise ValueError("主机用户管理地址只允许填写服务根地址")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("主机用户管理地址端口无效") from exc
+    if port is None or not 1 <= port <= 65535:
+        raise ValueError("主机用户管理地址必须包含有效端口")
+    return urlunsplit((parts.scheme.lower(), parts.netloc, "", "", ""))

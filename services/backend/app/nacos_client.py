@@ -42,6 +42,94 @@ def fetch_nacos_catalog(
     raise NacosIntegrationError("该 Nacos 暂不支持元数据目录接口") from last_path_error
 
 
+def fetch_nacos_config_content(
+    base_url: str,
+    username: str,
+    password: str,
+    namespace_id: str,
+    group: str,
+    data_id: str,
+) -> str:
+    timeout = httpx.Timeout(
+        connect=settings.nacos_connect_timeout_seconds,
+        read=settings.nacos_read_timeout_seconds,
+        write=settings.nacos_read_timeout_seconds,
+        pool=settings.nacos_connect_timeout_seconds,
+    )
+    last_path_error: Exception | None = None
+    with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+        for api_base_url in _candidate_api_base_urls(base_url):
+            try:
+                return _fetch_v2_config_content(
+                    client,
+                    api_base_url,
+                    username,
+                    password,
+                    namespace_id,
+                    group,
+                    data_id,
+                )
+            except _NacosPathUnavailable as exc:
+                last_path_error = exc
+                continue
+            except httpx.ConnectTimeout as exc:
+                raise NacosIntegrationError("连接 Nacos 超时") from exc
+            except httpx.ReadTimeout as exc:
+                raise NacosIntegrationError("等待 Nacos 响应超时") from exc
+            except httpx.ConnectError as exc:
+                raise NacosIntegrationError(
+                    "无法连接 Nacos，请检查地址、端口和网络"
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise NacosIntegrationError("Nacos HTTP 请求失败") from exc
+    raise NacosIntegrationError("该 Nacos 暂不支持配置读取接口") from last_path_error
+
+
+def _fetch_v2_config_content(
+    client: httpx.Client,
+    api_base_url: str,
+    username: str,
+    password: str,
+    namespace_id: str,
+    group: str,
+    data_id: str,
+) -> str:
+    config_path = f"{api_base_url}/v2/cs/config"
+    params = {
+        "namespaceId": "" if namespace_id == "public" else namespace_id,
+        "group": group,
+        "dataId": data_id,
+    }
+    response = client.get(config_path, params=params)
+    if response.status_code in {401, 403}:
+        params["accessToken"] = _login_v2(client, api_base_url, username, password)
+        response = client.get(config_path, params=params)
+    return _read_config_content(response)
+
+
+def _read_config_content(response: httpx.Response) -> str:
+    if response.status_code == 404:
+        raise _NacosPathUnavailable()
+    if response.status_code in {401, 403}:
+        raise NacosIntegrationError("Nacos 凭证无权读取该配置")
+    if response.status_code >= 400:
+        raise NacosIntegrationError(f"Nacos API 返回 HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise NacosIntegrationError("Nacos 配置接口响应格式无效") from exc
+    if not isinstance(payload, dict):
+        raise NacosIntegrationError("Nacos 配置接口响应格式无效")
+    code = payload.get("code")
+    if code not in {None, 0, 200}:
+        raise NacosIntegrationError("Nacos 配置读取失败")
+    data = payload.get("data")
+    content = data.get("content") if isinstance(data, dict) else data
+    if not isinstance(content, str):
+        raise NacosIntegrationError("Nacos 配置接口未返回有效正文")
+    return content
+
+
 def _fetch_v2_catalog(
     client: httpx.Client, api_base_url: str, username: str, password: str
 ) -> list[dict]:

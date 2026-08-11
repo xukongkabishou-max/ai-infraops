@@ -28,6 +28,9 @@ LOG_RECORD_FIELDS = (
     "namespace",
     "result_count",
     "user_id",
+    "middleware_instance_id",
+    "middleware_type",
+    "account_count",
     "target_url",
     "error_type",
 )

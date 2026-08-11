@@ -1,16 +1,107 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type UserWebSession = {
   access_token: string;
   client_type: "user_web";
 };
 
+type UserWebAuthResponse = UserWebSession & {
+  user: {
+    isSuperuser: boolean;
+  };
+  roles: string[];
+  permissions: string[];
+  menus: Array<{
+    code: string;
+    path: string;
+  }>;
+};
+
 type SectionKey = "machine" | "business" | "middleware" | "monitoring";
 type MachinePageKey = "environmentApis" | "machineAccounts" | "middlewareAccounts";
 type BusinessPageKey = "nodePorts" | "imageTags" | "gpuModels" | "envKeys";
 type MiddlewarePageKey = "nacosKeys" | "healthChecks";
+
+type ResourceHostOption = {
+  host_id: number;
+  environment_id: number;
+  environment_name: string;
+  hostname: string;
+  public_ip?: string | null;
+  private_ip?: string | null;
+  resource_mode: "k8s_cluster" | "standalone";
+  has_k8s_credential: boolean;
+  status: "configured" | "active" | "unreachable" | "disabled";
+  last_error?: string | null;
+};
+
+type ResourceCapacity = {
+  totalBytes: number;
+  usedBytes: number;
+  availableBytes: number;
+  usagePercent: number;
+  totalHuman: string;
+  usedHuman: string;
+  availableHuman: string;
+};
+
+type ResourceNode = {
+  name: string;
+  ready: boolean;
+  internal_ip?: string | null;
+  external_ip?: string | null;
+  metrics_available: boolean;
+  metrics_error?: string | null;
+  cpu: {
+    coreCount: number;
+    usagePercent: number;
+    window: "5m" | "sample";
+  };
+  memory: ResourceCapacity;
+  rootDisk: ResourceCapacity;
+};
+
+type ResourceInventory = {
+  resource_mode: "k8s_cluster" | "standalone";
+  host: ResourceHostOption;
+  scraped_at: string;
+  node_count: number;
+  nodes: ResourceNode[];
+};
+
+type LinuxAccountHost = {
+  host_id: number;
+  environment_id?: number | null;
+  environment_name?: string | null;
+  hostname: string;
+  status: "active" | "unreachable";
+  last_seen_at?: string | null;
+};
+
+type LinuxAccount = {
+  username: string;
+  uid: number;
+  gid: number;
+  comment: string;
+  home: string;
+  shell: string;
+  login_enabled: boolean;
+};
+
+type LinuxAccountInventory = {
+  host: LinuxAccountHost;
+  inventory: {
+    hostname: string;
+    collected_at: string;
+    discovered_count: number;
+    total_count: number;
+    human_count: number;
+    login_enabled_count: number;
+    users: LinuxAccount[];
+  };
+};
 
 type K8sHostOption = {
   host_id: number;
@@ -93,15 +184,71 @@ type NacosCatalog = {
   }>;
 };
 
+type NacosConfigStructure = {
+  instance: NacosInstanceOption;
+  namespace_id: string;
+  group: string;
+  data_id: string;
+  format: "yaml" | "json";
+  key_count: number;
+  structure: string;
+};
+
+type DatabaseInstanceOption = {
+  id: number;
+  environment_id: number;
+  environment_name: string;
+  instance_name: string;
+  status: "configured" | "active" | "unreachable" | "disabled";
+  last_seen_at?: string | null;
+};
+
+type DatabaseAccount = {
+  user_identity: string;
+  username: string;
+  host: string;
+  comment: string;
+  roles: string[];
+  privileges: Array<{
+    scope: string;
+    value: string;
+  }>;
+  password_managed: boolean;
+  password_updated_at?: string | null;
+  password_last_action?: "verified" | "reset" | "manual" | null;
+};
+
+type DatabaseAccountInventory = {
+  instance: DatabaseInstanceOption;
+  account_count: number;
+  accounts: DatabaseAccount[];
+};
+
+type DatabasePasswordCheck = {
+  password: string;
+  status: "idle" | "checking" | "matched" | "mismatch" | "resetting";
+  message: string;
+};
+
+type DatabaseManagedPasswordState = {
+  value: string;
+  visible: boolean;
+  editing: boolean;
+  status: "idle" | "loading" | "loaded" | "error";
+  message: string;
+};
+
 const navigationItems: Array<{
   key: SectionKey;
   label: string;
   hint: string;
+  menuCode: string;
+  permission: string;
 }> = [
-  { key: "machine", label: "机器信息管理", hint: "主机、日志、K8S 事件、账号" },
-  { key: "business", label: "业务系统管理", hint: "NodePort、镜像、模型、环境变量" },
-  { key: "middleware", label: "中间件系统管理", hint: "Nacos、数据库可用性" },
-  { key: "monitoring", label: "监控系统集成", hint: "待定能力预留" },
+  { key: "machine", label: "机器信息管理", hint: "主机、日志、K8S 事件、账号", menuCode: "portal.machine", permission: "page:machine:view" },
+  { key: "business", label: "业务系统管理", hint: "NodePort、镜像、模型、环境变量", menuCode: "portal.business", permission: "page:business:view" },
+  { key: "middleware", label: "中间件系统管理", hint: "Nacos、数据库可用性", menuCode: "portal.middleware", permission: "page:middleware:view" },
+  { key: "monitoring", label: "监控系统集成", hint: "待定能力预留", menuCode: "portal.monitoring", permission: "page:monitoring:view" },
 ];
 
 const sectionMeta: Record<
@@ -115,10 +262,10 @@ const sectionMeta: Record<
 > = {
   machine: {
     eyebrow: "机器信息管理",
-    title: "环境地址、机器账号与中间件账号",
+    title: "集群资源、机器账号与中间件账号",
     summary:
-      "面向研发提供各环境常用查询地址和账号信息入口，避免反复询问运维；当前先按子页面拆开静态展示。",
-    implementation: "地址信息当前先静态维护；机器账号后续通过 Linux API 获取；中间件账号后续通过对应中间件 API 获取。",
+      "面向研发提供各环境主机资源和账号信息入口；K8S 环境按集群节点展示，独立主机按 node-exporter 展示。",
+    implementation: "K8S 节点信息通过已登记 kubeconfig 访问 Prometheus Service Proxy；独立主机继续通过 node-exporter 获取。",
   },
   business: {
     eyebrow: "业务系统管理",
@@ -132,7 +279,7 @@ const sectionMeta: Record<
     title: "配置目录与核心中间件可用性校验",
     summary:
       "展示 Nacos 的 Namespace、Group、配置名称与格式，并为 MySQL、Doris、Redis、Kafka 等核心组件预留快速可用性校验入口。",
-    implementation: "Nacos 目录通过官方元数据接口实时获取且不读取配置正文；数据库可用性后续通过脚本模拟读写、生产消费和删除流程。",
+    implementation: "Nacos 目录通过官方元数据接口获取；用户点选单个 YAML/JSON 配置后，正文仅在服务端内存中解析并清空 value。数据库可用性后续通过脚本模拟读写、生产消费和删除流程。",
   },
   monitoring: {
     eyebrow: "监控系统集成",
@@ -152,52 +299,6 @@ const signals = [
   "K8s 集群配置已同步",
   "向量数据库延迟稳定",
   "Doris 数据链路运行正常",
-];
-
-const environmentRows = [
-  {
-    env: "开发 GPU 环境",
-    publicIp: "203.0.113.21",
-    privateIp: "10.20.1.21",
-    cpu: "72 核 / 18.4%",
-    memory: "256 GiB / 剩余 148 GiB",
-    disk: "1.8 TiB / 剩余 820 GiB",
-    loki: "/api/logs/loki/query?env=dev-gpu",
-    k8s: "/api/k8s/events?cluster=dev-gpu",
-  },
-  {
-    env: "测试 GPU 环境",
-    publicIp: "203.0.113.32",
-    privateIp: "10.30.1.32",
-    cpu: "48 核 / 12.8%",
-    memory: "192 GiB / 剩余 116 GiB",
-    disk: "1.7 TiB / 剩余 795 GiB",
-    loki: "/api/logs/loki/query?env=test-gpu",
-    k8s: "/api/k8s/events?cluster=test-gpu",
-  },
-  {
-    env: "生产 CPU 环境",
-    publicIp: "203.0.113.45",
-    privateIp: "10.40.1.45",
-    cpu: "64 核 / 21.5%",
-    memory: "128 GiB / 剩余 74 GiB",
-    disk: "900 GiB / 剩余 410 GiB",
-    loki: "/api/logs/loki/query?env=prod-cpu",
-    k8s: "/api/k8s/events?cluster=prod-cpu",
-  },
-];
-
-const machineAccountRows = [
-  { env: "开发环境 GPU", hostGroup: "dev-gpu-*", username: "dev_reader", password: "******", privilege: "只读巡检" },
-  { env: "测试环境 GPU", hostGroup: "test-gpu-*", username: "test_ops", password: "******", privilege: "运维执行" },
-  { env: "生产环境 CPU", hostGroup: "prod-cpu-*", username: "prod_readonly", password: "******", privilege: "只读审计" },
-];
-
-const middlewareAccountRows = [
-  { env: "生产环境", middleware: "RDS", instance: "core-business-db", username: "biz_reader", password: "******", privilege: "只读" },
-  { env: "测试环境", middleware: "Milvus", instance: "vector-search", username: "milvus_test", password: "******", privilege: "读写测试库" },
-  { env: "开发环境", middleware: "Redis", instance: "session-cache", username: "session_runtime", password: "******", privilege: "指定 DB 读写" },
-  { env: "测试环境", middleware: "Kafka", instance: "event-bus", username: "ops_consumer", password: "******", privilege: "测试 Topic 消费" },
 ];
 
 const gpuModelRows = [
@@ -237,6 +338,24 @@ export default function Home() {
   const [activeBusinessPage, setActiveBusinessPage] = useState<BusinessPageKey>("nodePorts");
   const [activeMiddlewarePage, setActiveMiddlewarePage] = useState<MiddlewarePageKey>("nacosKeys");
   const [authenticated, setAuthenticated] = useState(false);
+  const [isSuperuser, setIsSuperuser] = useState(false);
+  const [permissions, setPermissions] = useState<string[]>([]);
+  const [menus, setMenus] = useState<UserWebAuthResponse["menus"]>([]);
+
+  const visibleNavigationItems = useMemo(() => {
+    if (isSuperuser) return navigationItems;
+    const permissionSet = new Set(permissions);
+    const menuCodeSet = new Set(menus.map((menu) => menu.code));
+    return navigationItems.filter(
+      (item) => permissionSet.has(item.permission) && menuCodeSet.has(item.menuCode),
+    );
+  }, [isSuperuser, menus, permissions]);
+
+  function applyAuthorization(data: UserWebAuthResponse) {
+    setIsSuperuser(Boolean(data.user?.isSuperuser));
+    setPermissions(data.permissions ?? []);
+    setMenus(data.menus ?? []);
+  }
 
   useEffect(() => {
     let alive = true;
@@ -256,15 +375,19 @@ export default function Home() {
         }
         return response.json();
       })
-      .then(() => {
+      .then((data: UserWebAuthResponse) => {
         if (alive) {
           setAuthenticated(true);
+          applyAuthorization(data);
         }
       })
       .catch(() => {
         window.localStorage.removeItem(userSessionStorageKey);
         if (alive) {
           setAuthenticated(false);
+          setIsSuperuser(false);
+          setPermissions([]);
+          setMenus([]);
         }
       });
 
@@ -288,7 +411,7 @@ export default function Home() {
       if (!response.ok) {
         throw new Error(data.detail ?? "登录失败，请检查账号或密码");
       }
-      const loginSession = data as UserWebSession;
+      const loginSession = data as UserWebAuthResponse;
       window.localStorage.setItem(
         userSessionStorageKey,
         JSON.stringify({
@@ -297,6 +420,7 @@ export default function Home() {
         }),
       );
       setAuthenticated(true);
+      applyAuthorization(loginSession);
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "登录失败");
     } finally {
@@ -315,10 +439,30 @@ export default function Home() {
     }
     window.localStorage.removeItem(userSessionStorageKey);
     setAuthenticated(false);
+    setIsSuperuser(false);
+    setPermissions([]);
+    setMenus([]);
   }
 
   if (authenticated) {
-    const meta = sectionMeta[activeSection];
+    const effectiveSection = visibleNavigationItems.some((item) => item.key === activeSection)
+      ? activeSection
+      : visibleNavigationItems[0]?.key;
+
+    if (!effectiveSection) {
+      return (
+        <main className="grid min-h-screen place-items-center bg-[#04050b] px-6 text-white">
+          <div className="max-w-lg border border-[#1b255d] bg-[#070b1b] p-8 text-center">
+            <h1 className="text-xl font-black">当前账号没有可访问的页面</h1>
+            <button className="mt-6 h-10 rounded-[6px] border border-[#4b5fc6] px-4 text-sm font-bold" onClick={handleLogout} type="button">
+              退出登录
+            </button>
+          </div>
+        </main>
+      );
+    }
+
+    const meta = sectionMeta[effectiveSection];
 
     return (
       <main className="min-h-screen bg-[#04050b] text-white">
@@ -335,8 +479,8 @@ export default function Home() {
             </div>
 
             <nav className="space-y-2">
-              {navigationItems.map((item) => {
-                const active = item.key === activeSection;
+              {visibleNavigationItems.map((item) => {
+                const active = item.key === effectiveSection;
                 return (
                   <button
                     className={`w-full rounded-[6px] px-4 py-3 text-left transition ${
@@ -376,19 +520,20 @@ export default function Home() {
 
             <div className="space-y-5 px-6 py-6 lg:px-8">
               <ImplementationPanel text={meta.implementation} />
-              {activeSection === "machine" ? (
+              {effectiveSection === "machine" ? (
                 <MachineInformationView
                   activePage={activeMachinePage}
+                  isSuperuser={isSuperuser}
                   onSetActivePage={setActiveMachinePage}
                 />
               ) : null}
-              {activeSection === "business" ? (
+              {effectiveSection === "business" ? (
                 <BusinessSystemView activePage={activeBusinessPage} onSetActivePage={setActiveBusinessPage} />
               ) : null}
-              {activeSection === "middleware" ? (
+              {effectiveSection === "middleware" ? (
                 <MiddlewareSystemView activePage={activeMiddlewarePage} onSetActivePage={setActiveMiddlewarePage} />
               ) : null}
-              {activeSection === "monitoring" ? <MonitoringIntegrationView /> : null}
+              {effectiveSection === "monitoring" ? <MonitoringIntegrationView /> : null}
             </div>
           </section>
         </div>
@@ -524,15 +669,17 @@ export default function Home() {
 
 function MachineInformationView({
   activePage,
+  isSuperuser,
   onSetActivePage,
 }: {
   activePage: MachinePageKey;
+  isSuperuser: boolean;
   onSetActivePage: (page: MachinePageKey) => void;
 }) {
   const pages: Array<{ key: MachinePageKey; label: string; hint: string }> = [
-    { key: "environmentApis", label: "环境 API 地址", hint: "资源、日志、Pod 状态和事件查询地址" },
+    { key: "environmentApis", label: "集群与主机资源", hint: "CPU、内存与根目录使用情况" },
     { key: "machineAccounts", label: "机器账号列表", hint: "各环境 Linux 机器账号" },
-    { key: "middlewareAccounts", label: "中间件账号获取", hint: "RDS、Milvus、Redis、Kafka 等账号" },
+    { key: "middlewareAccounts", label: "中间件账号获取", hint: "按环境查询 Doris / MySQL 账号" },
   ];
 
   return (
@@ -540,59 +687,987 @@ function MachineInformationView({
       <SubPageNav activeKey={activePage} items={pages} onChange={onSetActivePage} />
 
       {activePage === "environmentApis" ? (
-        <SectionBlock title="环境 API 地址查询" description="这里不做资源查询功能，只给研发展示各环境可用的查询地址；手动维护还是自动同步后续再定。">
+        <ResourceInventoryView />
+      ) : null}
+
+      {activePage === "machineAccounts" ? (
+        <LinuxAccountInventoryView />
+      ) : null}
+
+      {activePage === "middlewareAccounts" ? (
+        <DatabaseAccountInventoryView isSuperuser={isSuperuser} />
+      ) : null}
+    </div>
+  );
+}
+
+function LinuxAccountInventoryView() {
+  const [hosts, setHosts] = useState<LinuxAccountHost[]>([]);
+  const [environment, setEnvironment] = useState("all");
+  const [hostId, setHostId] = useState("");
+  const [result, setResult] = useState<LinuxAccountInventory | null>(null);
+  const [loadingHosts, setLoadingHosts] = useState(true);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchUserApi<LinuxAccountHost[]>("/api/linux-accounts/hosts", controller.signal)
+      .then((items) => {
+        setHosts(items);
+        setHostId(items[0] ? String(items[0].host_id) : "");
+      })
+      .catch((loadError) => {
+        if (!controller.signal.aborted) {
+          setError(loadError instanceof Error ? loadError.message : "加载主机失败");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingHosts(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!hostId) {
+      setResult(null);
+      return;
+    }
+    const controller = new AbortController();
+    setLoadingAccounts(true);
+    setError("");
+    fetchUserApi<LinuxAccountInventory>(`/api/linux-accounts/hosts/${hostId}`, controller.signal)
+      .then((data) => setResult(data))
+      .catch((loadError) => {
+        if (!controller.signal.aborted) {
+          setResult(null);
+          setError(loadError instanceof Error ? loadError.message : "获取账号列表失败");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingAccounts(false);
+      });
+    return () => controller.abort();
+  }, [hostId]);
+
+  const environments = Array.from(
+    new Set(hosts.map((host) => host.environment_name || "未关联环境")),
+  );
+  const visibleHosts = hosts.filter(
+    (host) => environment === "all" || (host.environment_name || "未关联环境") === environment,
+  );
+
+  function handleEnvironmentChange(value: string) {
+    setEnvironment(value);
+    const nextHost = hosts.find(
+      (host) => value === "all" || (host.environment_name || "未关联环境") === value,
+    );
+    setHostId(nextHost ? String(nextHost.host_id) : "");
+  }
+
+  async function refreshAccounts() {
+    if (!hostId) return;
+    setLoadingAccounts(true);
+    setError("");
+    try {
+      setResult(await fetchUserApi<LinuxAccountInventory>(`/api/linux-accounts/hosts/${hostId}`));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "获取账号列表失败");
+    } finally {
+      setLoadingAccounts(false);
+    }
+  }
+
+  return (
+    <SectionBlock title="各环境机器账号列表" description="只展示普通用户 UID 范围内的人工账号；root、系统账号和软件服务账号均已自动排除，不读取密码或密码哈希。">
+      <div className="grid gap-4 rounded-[6px] border border-white/10 bg-[#070b1b] p-4 md:grid-cols-[1fr_1fr_auto]">
+        <label className="block">
+          <span className="mb-2 block text-xs font-semibold text-[#bfc9e7]/58">所属环境</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => handleEnvironmentChange(event.target.value)} value={environment}>
+            <option value="all">全部环境</option>
+            {environments.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-semibold text-[#bfc9e7]/58">主机</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm outline-none focus:border-[#7f91ff]" disabled={visibleHosts.length === 0} onChange={(event) => setHostId(event.target.value)} value={hostId}>
+            {visibleHosts.length === 0 ? <option value="">暂无已接入主机</option> : null}
+            {visibleHosts.map((host) => <option key={host.host_id} value={host.host_id}>{host.hostname}</option>)}
+          </select>
+        </label>
+        <button className="h-11 self-end rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black transition hover:bg-[#1628ff] disabled:cursor-not-allowed disabled:opacity-60" disabled={!hostId || loadingAccounts} onClick={refreshAccounts} type="button">
+          {loadingAccounts ? "获取中..." : "刷新账号列表"}
+        </button>
+      </div>
+
+      {error ? <p className="mt-4 rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-4 py-3 text-sm text-[#ff9aa3]">{error}</p> : null}
+      {loadingHosts ? <p className="mt-4 py-10 text-center text-sm text-[#bfc9e7]/58">正在加载已接入主机...</p> : null}
+      {!loadingHosts && hosts.length === 0 ? <p className="mt-4 rounded-[6px] border border-dashed border-white/14 px-4 py-10 text-center text-sm text-[#bfc9e7]/58">后台尚未为任何主机配置用户管理 Agent 地址。</p> : null}
+
+      {result ? (
+        <div className="mt-5">
+          <div className="mb-4 grid gap-3 sm:grid-cols-2">
+            {[
+              ["人工账号", result.inventory.total_count],
+              ["可登录 Shell", result.inventory.login_enabled_count],
+            ].map(([label, value]) => (
+              <div className="rounded-[6px] border border-white/10 bg-[#070b1b] px-4 py-3" key={label}>
+                <p className="text-xs text-[#bfc9e7]/52">{label}</p>
+                <p className="mt-1 text-2xl font-black text-white">{value}</p>
+              </div>
+            ))}
+          </div>
+          <div className="mb-3 flex flex-wrap justify-between gap-2 text-xs text-[#bfc9e7]/52">
+            <span>主机：{result.host.hostname}</span>
+            <span>发现 {result.inventory.discovered_count} 个本地账号，排除 {result.inventory.discovered_count - result.inventory.total_count} 个系统基础账号</span>
+            <span>采集时间：{formatDateTime(result.inventory.collected_at)}</span>
+          </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[980px] text-left text-sm">
-              <thead className="text-xs text-[#bfc9e7]/52">
-                <tr className="border-b border-white/10">
-                  <th className="py-3 pr-4">环境</th>
-                  <th className="py-3 pr-4">CPU / 内存 / 根目录磁盘</th>
-                  <th className="py-3 pr-4">公网 / 私网 IP</th>
-                  <th className="py-3 pr-4">Loki 日志 API</th>
-                  <th className="py-3 pr-4">K8S Pod 状态与事件 API</th>
-                </tr>
-              </thead>
+            <table className="w-full min-w-[920px] text-left text-sm">
+              <thead><tr className="border-b border-white/10 text-xs text-[#bfc9e7]/52"><th className="py-3 pr-4">用户名</th><th className="py-3 pr-4">UID / GID</th><th className="py-3 pr-4">登录状态</th><th className="py-3 pr-4">Shell</th><th className="py-3 pr-4">Home</th><th className="py-3">备注</th></tr></thead>
               <tbody>
-                {environmentRows.map((row) => (
-                  <tr className="border-b border-white/8 text-[#bfc9e7]/78" key={row.env}>
-                    <td className="py-4 pr-4 font-bold text-white">{row.env}</td>
-                    <td className="py-4 pr-4">
-                      <p>CPU：{row.cpu}</p>
-                      <p className="mt-1">内存：{row.memory}</p>
-                      <p className="mt-1">磁盘：{row.disk}</p>
-                    </td>
-                    <td className="py-4 pr-4">
-                      <p>公网：{row.publicIp}</p>
-                      <p className="mt-1 text-[#bfc9e7]/54">私网：{row.privateIp}</p>
-                    </td>
-                    <td className="py-4 pr-4 font-mono text-xs text-[#9fb0ff]">{row.loki}</td>
-                    <td className="py-4 pr-4 font-mono text-xs text-[#9fb0ff]">{row.k8s}</td>
+                {result.inventory.users.map((user) => (
+                  <tr className="border-b border-white/8 text-[#bfc9e7]/78" key={`${user.username}-${user.uid}`}>
+                    <td className="py-3 pr-4 font-bold text-white">{user.username}</td><td className="py-3 pr-4 font-mono text-xs">{user.uid} / {user.gid}</td><td className="py-3 pr-4">{user.login_enabled ? "可登录" : "已禁用 Shell"}</td><td className="py-3 pr-4 font-mono text-xs">{user.shell}</td><td className="py-3 pr-4 font-mono text-xs">{user.home}</td><td className="py-3">{user.comment || "-"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        </SectionBlock>
+        </div>
       ) : null}
+    </SectionBlock>
+  );
+}
 
-      {activePage === "machineAccounts" ? (
-        <SectionBlock title="各环境机器账号列表" description="示例展示为脱敏密码。真实接入后仅对运维内部授权用户展示。">
-          <CompactTable
-            columns={["环境", "机器范围", "用户名", "密码", "权限说明"]}
-            rows={machineAccountRows.map((row) => [row.env, row.hostGroup, row.username, row.password, row.privilege])}
-          />
-        </SectionBlock>
-      ) : null}
+function ResourceInventoryView() {
+  const [targets, setTargets] = useState<ResourceHostOption[]>([]);
+  const [environmentFilter, setEnvironmentFilter] = useState("all");
+  const [inventories, setInventories] = useState<Record<number, ResourceInventory>>({});
+  const [loadingByHost, setLoadingByHost] = useState<Record<number, boolean>>({});
+  const [errorsByHost, setErrorsByHost] = useState<Record<number, string>>({});
+  const [loadingTargets, setLoadingTargets] = useState(true);
+  const [refreshingAll, setRefreshingAll] = useState(false);
 
-      {activePage === "middlewareAccounts" ? (
-        <SectionBlock title="中间件账号获取" description="示例展示为脱敏密码。后续由各中间件 API 或管理后台同步已创建账号。">
-        <CompactTable
-          columns={["环境", "中间件", "实例", "用户名", "密码", "权限说明"]}
-          rows={middlewareAccountRows.map((row) => [row.env, row.middleware, row.instance, row.username, row.password, row.privilege])}
-        />
-        </SectionBlock>
-      ) : null}
+  useEffect(() => {
+    const controller = new AbortController();
+    async function loadInitialResources() {
+      try {
+        const items = await fetchUserApi<ResourceHostOption[]>(
+          "/api/resources/hosts",
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
+
+        setTargets(items);
+        setLoadingTargets(false);
+        setLoadingByHost(
+          Object.fromEntries(items.map((item) => [item.host_id, true])),
+        );
+
+        await Promise.all(
+          items.map(async (item) => {
+            try {
+              const detail = await fetchUserApi<ResourceInventory>(
+                `/api/resources/hosts/${item.host_id}/metrics`,
+                controller.signal,
+              );
+              if (controller.signal.aborted) return;
+              setInventories((current) => ({ ...current, [item.host_id]: detail }));
+              setErrorsByHost((current) => ({ ...current, [item.host_id]: "" }));
+            } catch (loadError) {
+              if (controller.signal.aborted) return;
+              setErrorsByHost((current) => ({
+                ...current,
+                [item.host_id]: loadError instanceof Error ? loadError.message : "机器资源加载失败",
+              }));
+            } finally {
+              if (!controller.signal.aborted) {
+                setLoadingByHost((current) => ({ ...current, [item.host_id]: false }));
+              }
+            }
+          }),
+        );
+      } catch (loadError) {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") {
+          return;
+        }
+        setErrorsByHost({
+          0: loadError instanceof Error ? loadError.message : "主机列表加载失败",
+        });
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoadingTargets(false);
+        }
+      }
+    }
+    void loadInitialResources();
+    return () => controller.abort();
+  }, []);
+
+  async function refreshHost(hostId: number) {
+    setLoadingByHost((current) => ({ ...current, [hostId]: true }));
+    setErrorsByHost((current) => ({ ...current, [hostId]: "" }));
+    try {
+      const detail = await fetchUserApi<ResourceInventory>(
+        `/api/resources/hosts/${hostId}/metrics`,
+      );
+      setInventories((current) => ({ ...current, [hostId]: detail }));
+    } catch (loadError) {
+      setErrorsByHost((current) => ({
+        ...current,
+        [hostId]: loadError instanceof Error ? loadError.message : "机器资源加载失败",
+      }));
+    } finally {
+      setLoadingByHost((current) => ({ ...current, [hostId]: false }));
+    }
+  }
+
+  async function refreshAllHosts() {
+    if (targets.length === 0) return;
+    setRefreshingAll(true);
+    try {
+      await Promise.all(targets.map((target) => refreshHost(target.host_id)));
+    } finally {
+      setRefreshingAll(false);
+    }
+  }
+
+  const environmentOptions = useMemo(
+    () => Array.from(new Set(targets.map((target) => target.environment_name || "未关联环境"))),
+    [targets],
+  );
+  const visibleTargets = useMemo(
+    () => environmentFilter === "all"
+      ? targets
+      : targets.filter((target) => (target.environment_name || "未关联环境") === environmentFilter),
+    [environmentFilter, targets],
+  );
+
+  return (
+    <SectionBlock
+      title="主机资源信息"
+      description="全部主机统一展示；配置 K8S 凭证的环境展开集群内所有节点，未配置凭证的环境展示独立主机指标。"
+    >
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
+        <label className="block w-full sm:w-[320px]">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">环境筛选</span>
+          <select
+            className="h-10 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none transition focus:border-[#4b5fc6] disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={loadingTargets || targets.length === 0}
+            onChange={(event) => setEnvironmentFilter(event.target.value)}
+            value={environmentFilter}
+          >
+            <option value="all">全部环境（{environmentOptions.length}）</option>
+            {environmentOptions.map((environmentName) => (
+              <option key={environmentName} value={environmentName}>
+                {environmentName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="h-10 rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white transition hover:bg-[#1628ff] disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={loadingTargets || refreshingAll || targets.length === 0}
+          onClick={refreshAllHosts}
+          type="button"
+        >
+          {refreshingAll ? "正在全部刷新..." : "全部刷新指标"}
+        </button>
+      </div>
+
+      <div className="overflow-x-auto rounded-[6px] border border-white/10">
+        <table className="w-full min-w-[1160px] table-fixed text-left text-sm">
+          <colgroup>
+            <col className="w-[22%]" />
+            <col className="w-[20%]" />
+            <col className="w-[18%]" />
+            <col className="w-[20%]" />
+            <col className="w-[20%]" />
+          </colgroup>
+          <thead className="bg-[#070b1b] text-xs text-[#bfc9e7]/56">
+            <tr className="border-b border-white/10">
+              <th className="px-4 py-3">所属环境</th>
+              <th className="px-4 py-3">节点名称</th>
+              <th className="px-4 py-3">CPU</th>
+              <th className="px-4 py-3">内存</th>
+              <th className="px-4 py-3">根目录</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loadingTargets ? (
+              <tr>
+                <td className="px-4 py-12 text-center text-[#bfc9e7]/58" colSpan={5}>
+                  加载中，正在读取已登记主机...
+                </td>
+              </tr>
+            ) : null}
+
+            {!loadingTargets && targets.length === 0 ? (
+              <tr>
+                <td className="px-4 py-12 text-center text-[#bfc9e7]/58" colSpan={5}>
+                  {errorsByHost[0] || "请先在后台管理页面添加主机信息。"}
+                </td>
+              </tr>
+            ) : null}
+
+            {!loadingTargets && targets.length > 0 && visibleTargets.length === 0 ? (
+              <tr>
+                <td className="px-4 py-12 text-center text-[#bfc9e7]/58" colSpan={5}>
+                  当前筛选条件下没有主机资源。
+                </td>
+              </tr>
+            ) : null}
+
+            {!loadingTargets ? visibleTargets.map((target) => {
+              const inventory = inventories[target.host_id];
+              const nodes = inventory?.nodes ?? [];
+              const loading = Boolean(loadingByHost[target.host_id]);
+              const error = errorsByHost[target.host_id];
+
+              if (nodes.length === 0) {
+                return (
+                  <tr className="border-t border-white/15" key={target.host_id}>
+                    <td className="bg-[#070b1b]/45 px-4 py-5 align-top">
+                      <ResourceEnvironmentCell
+                        error={error}
+                        loading={loading}
+                        nodeCount={0}
+                        onRefresh={() => refreshHost(target.host_id)}
+                        target={target}
+                      />
+                    </td>
+                    <td className="px-4 py-8 text-center text-[#bfc9e7]/58" colSpan={4}>
+                      {loading ? "加载中，正在读取节点和资源指标..." : error || "该环境未返回节点信息"}
+                    </td>
+                  </tr>
+                );
+              }
+
+              return nodes.map((node, nodeIndex) => (
+                <tr
+                  className={`${nodeIndex === 0 ? "border-t border-white/15" : "border-t border-white/8"}`}
+                  key={`${target.host_id}-${node.name}`}
+                >
+                  {nodeIndex === 0 ? (
+                    <td className="bg-[#070b1b]/45 px-4 py-5 align-top" rowSpan={nodes.length}>
+                      <ResourceEnvironmentCell
+                        error={error}
+                        loading={loading}
+                        nodeCount={inventory.node_count}
+                        onRefresh={() => refreshHost(target.host_id)}
+                        target={target}
+                      />
+                    </td>
+                  ) : null}
+                  <td className="px-4 py-5 align-top">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="break-all font-black text-white">{node.name}</span>
+                      <span className={`rounded-full px-2 py-1 text-[10px] font-bold ${node.ready ? "bg-[#0a1ae1]/40 text-[#9fb0ff]" : "bg-[#a30613]/30 text-[#ff9aa3]"}`}>
+                        {node.ready ? "Ready" : "NotReady"}
+                      </span>
+                    </div>
+                    {!node.metrics_available ? <p className="mt-2 break-words text-xs leading-5 text-[#ff9aa3]">{node.metrics_error || "暂无指标"}</p> : null}
+                  </td>
+                  <ResourceTableMetric
+                    available={node.metrics_available}
+                    detail={`${node.cpu.coreCount} 逻辑核 / ${node.cpu.window === "5m" ? "最近 5 分钟" : "实时采样"}`}
+                    value={`${node.cpu.usagePercent}%`}
+                  />
+                  <ResourceTableMetric
+                    available={node.metrics_available}
+                    detail={`总量 ${node.memory.totalHuman} / 已用 ${node.memory.usedHuman} / 可用 ${node.memory.availableHuman}`}
+                    value={`${node.memory.usagePercent}%`}
+                  />
+                  <ResourceTableMetric
+                    available={node.metrics_available}
+                    detail={`总量 ${node.rootDisk.totalHuman} / 已用 ${node.rootDisk.usedHuman} / 剩余 ${node.rootDisk.availableHuman}`}
+                    value={`${node.rootDisk.usagePercent}%`}
+                  />
+                </tr>
+              ));
+            }) : null}
+          </tbody>
+        </table>
+      </div>
+    </SectionBlock>
+  );
+}
+
+function ResourceEnvironmentCell({
+  error,
+  loading,
+  nodeCount,
+  onRefresh,
+  target,
+}: {
+  error?: string;
+  loading: boolean;
+  nodeCount: number;
+  onRefresh: () => void;
+  target: ResourceHostOption;
+}) {
+  return (
+    <div className="min-w-0">
+      <p className="break-words font-black text-white">{target.environment_name || "未关联环境"}</p>
+      <p className="mt-2 text-xs leading-5 text-[#bfc9e7]/58">
+        {target.resource_mode === "k8s_cluster" ? `K8S 集群 · ${nodeCount} 个节点` : "独立主机 · node-exporter"}
+      </p>
+      <button
+        className="mt-3 h-9 rounded-[6px] border border-[#4b5fc6] px-3 text-xs font-bold text-[#bfc9ff] transition hover:bg-[#0a1ae1]/24 disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={loading}
+        onClick={onRefresh}
+        type="button"
+      >
+        {loading ? "刷新中..." : "刷新指标"}
+      </button>
+      {error ? <p className="mt-3 break-words text-xs leading-5 text-[#ff9aa3]">{error}</p> : null}
     </div>
+  );
+}
+
+function ResourceTableMetric({
+  available,
+  detail,
+  value,
+}: {
+  available: boolean;
+  detail: string;
+  value: string;
+}) {
+  return (
+    <td className="px-4 py-5 align-top">
+      <p className="text-xl font-black text-white">{available ? value : "--"}</p>
+      <p className="mt-2 break-words text-xs leading-5 text-[#bfc9e7]/58">{available ? detail : "暂无指标"}</p>
+    </td>
+  );
+}
+
+function DatabaseAccountInventoryView({ isSuperuser }: { isSuperuser: boolean }) {
+  const [databaseType, setDatabaseType] = useState<"doris" | "mysql">("doris");
+  const [instances, setInstances] = useState<DatabaseInstanceOption[]>([]);
+  const [environmentName, setEnvironmentName] = useState("");
+  const [instanceId, setInstanceId] = useState("");
+  const [inventory, setInventory] = useState<DatabaseAccountInventory | null>(null);
+  const [loadingInstances, setLoadingInstances] = useState(true);
+  const [querying, setQuerying] = useState(false);
+  const [error, setError] = useState("");
+  const [passwordChecks, setPasswordChecks] = useState<Record<string, DatabasePasswordCheck>>({});
+  const [managedPasswords, setManagedPasswords] = useState<Record<string, DatabaseManagedPasswordState>>({});
+
+  const environments = useMemo(
+    () => Array.from(new Set(instances.map((instance) => instance.environment_name))),
+    [instances],
+  );
+  const environmentInstances = useMemo(
+    () => instances.filter((instance) => instance.environment_name === environmentName),
+    [environmentName, instances],
+  );
+  const databaseLabel = databaseType === "doris" ? "Doris" : "MySQL";
+
+  function handleDatabaseTypeChange(nextType: "doris" | "mysql") {
+    if (nextType === databaseType) {
+      return;
+    }
+    setLoadingInstances(true);
+    setInstances([]);
+    setEnvironmentName("");
+    setInstanceId("");
+    setInventory(null);
+    setPasswordChecks({});
+    setManagedPasswords({});
+    setError("");
+    setDatabaseType(nextType);
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchUserApi<DatabaseInstanceOption[]>(`/api/${databaseType}/instances`, controller.signal)
+      .then((items) => {
+        setInstances(items);
+        const first = items[0];
+        if (first) {
+          setEnvironmentName(first.environment_name);
+          setInstanceId(String(first.id));
+        }
+      })
+      .catch((loadError) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") {
+          return;
+        }
+        setError(loadError instanceof Error ? loadError.message : `${databaseLabel} 实例加载失败`);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setLoadingInstances(false);
+        }
+      });
+    return () => controller.abort();
+  }, [databaseLabel, databaseType]);
+
+  async function handleLoadAccounts() {
+    if (!instanceId) {
+      return;
+    }
+    setQuerying(true);
+    setError("");
+    setInventory(null);
+    setPasswordChecks({});
+    setManagedPasswords({});
+    try {
+      const result = await fetchUserApi<DatabaseAccountInventory>(
+        `/api/${databaseType}/instances/${instanceId}/accounts`,
+      );
+      setInventory(result);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : `${databaseLabel} 账号列表获取失败`);
+    } finally {
+      setQuerying(false);
+    }
+  }
+
+  function updateManagedPassword(
+    userIdentity: string,
+    patch: Partial<DatabaseManagedPasswordState>,
+  ) {
+    setManagedPasswords((current) => {
+      const existing = current[userIdentity] ?? {
+        value: "",
+        visible: false,
+        editing: false,
+        status: "idle",
+        message: "",
+      };
+      return {
+        ...current,
+        [userIdentity]: { ...existing, ...patch },
+      };
+    });
+  }
+
+  function markPasswordManaged(userIdentity: string, password: string) {
+    updateManagedPassword(userIdentity, {
+      value: password,
+      visible: false,
+      editing: false,
+      status: "loaded",
+      message: "",
+    });
+    setInventory((current) => current ? {
+      ...current,
+      accounts: current.accounts.map((account) => account.user_identity === userIdentity ? {
+        ...account,
+        password_managed: true,
+        password_updated_at: new Date().toISOString(),
+      } : account),
+    } : current);
+  }
+
+  async function handleSaveManagedPassword(account: DatabaseAccount) {
+    const current = managedPasswords[account.user_identity];
+    if (!instanceId || !current?.value) {
+      return;
+    }
+    updateManagedPassword(account.user_identity, { status: "loading", message: "" });
+    try {
+      const result = await mutateUserApi<{ saved: boolean; updated_at: string }>(
+        `/api/${databaseType}/instances/${instanceId}/accounts/password/current`,
+        "PUT",
+        { user_identity: account.user_identity, password: current.value },
+      );
+      markPasswordManaged(account.user_identity, current.value);
+      setInventory((inventory) => inventory ? {
+        ...inventory,
+        accounts: inventory.accounts.map((item) => item.user_identity === account.user_identity ? {
+          ...item,
+          password_managed: true,
+          password_updated_at: result.updated_at,
+          password_last_action: "manual",
+        } : item),
+      } : inventory);
+      updateManagedPassword(account.user_identity, {
+        editing: false,
+        status: "loaded",
+        message: "已保存，尚未校验",
+      });
+    } catch (saveError) {
+      updateManagedPassword(account.user_identity, {
+        status: "error",
+        message: saveError instanceof Error ? saveError.message : "当前密码保存失败",
+      });
+    }
+  }
+
+  async function handleManagedPassword(
+    account: DatabaseAccount,
+    purpose: "view" | "copy",
+  ) {
+    const current = managedPasswords[account.user_identity];
+    if (purpose === "view" && current?.status === "loaded") {
+      updateManagedPassword(account.user_identity, {
+        visible: !current.visible,
+        message: "",
+      });
+      return;
+    }
+
+    updateManagedPassword(account.user_identity, { status: "loading", message: "" });
+    try {
+      const result = await mutateUserApi<{ password: string; updated_at: string }>(
+        `/api/${databaseType}/instances/${instanceId}/accounts/password/current`,
+        "POST",
+        { user_identity: account.user_identity, purpose },
+      );
+      if (purpose === "copy") {
+        await navigator.clipboard.writeText(result.password);
+      }
+      updateManagedPassword(account.user_identity, {
+        value: result.password,
+        visible: purpose === "view",
+        status: "loaded",
+        message: purpose === "copy" ? "已复制" : "",
+      });
+    } catch (managedError) {
+      updateManagedPassword(account.user_identity, {
+        status: "error",
+        message: managedError instanceof Error ? managedError.message : "当前密码读取失败",
+      });
+    }
+  }
+
+  function updatePasswordCheck(userIdentity: string, patch: Partial<DatabasePasswordCheck>) {
+    setPasswordChecks((current) => {
+      const existing = current[userIdentity] ?? {
+        password: "",
+        status: "idle",
+        message: "",
+      };
+      return {
+        ...current,
+        [userIdentity]: { ...existing, ...patch },
+      };
+    });
+  }
+
+  async function handleVerifyPassword(account: DatabaseAccount) {
+    const check = passwordChecks[account.user_identity];
+    if (!instanceId || !check?.password) {
+      return;
+    }
+    updatePasswordCheck(account.user_identity, { status: "checking", message: "" });
+    try {
+      const result = await mutateUserApi<{ matched: boolean; managed_password_updated: boolean }>(
+        `/api/${databaseType}/instances/${instanceId}/accounts/password/verify`,
+        "POST",
+        { user_identity: account.user_identity, password: check.password },
+      );
+      updatePasswordCheck(account.user_identity, {
+        status: result.matched ? "matched" : "mismatch",
+        message: result.matched ? "密码一致" : "密码不一致",
+      });
+      if (result.matched && result.managed_password_updated) {
+        markPasswordManaged(account.user_identity, check.password);
+      }
+    } catch (verifyError) {
+      updatePasswordCheck(account.user_identity, {
+        status: "idle",
+        message: verifyError instanceof Error ? verifyError.message : "密码校验失败",
+      });
+    }
+  }
+
+  async function handleResetPassword(account: DatabaseAccount) {
+    const check = passwordChecks[account.user_identity];
+    if (!instanceId || !check?.password || check.status !== "mismatch") {
+      return;
+    }
+    updatePasswordCheck(account.user_identity, { status: "resetting", message: "" });
+    try {
+      await mutateUserApi<{ updated: boolean }>(
+        `/api/${databaseType}/instances/${instanceId}/accounts/password`,
+        "PUT",
+        { user_identity: account.user_identity, password: check.password },
+      );
+      updatePasswordCheck(account.user_identity, {
+        status: "matched",
+        message: "已同步，密码一致",
+      });
+      markPasswordManaged(account.user_identity, check.password);
+    } catch (resetError) {
+      updatePasswordCheck(account.user_identity, {
+        status: "mismatch",
+        message: resetError instanceof Error ? resetError.message : "密码同步失败",
+      });
+    }
+  }
+
+  return (
+    <SectionBlock title="数据库账号获取" description="按所属环境和实例实时查询 Doris 或 MySQL 账号信息。">
+      <div className="mb-4 flex gap-2" role="group" aria-label="数据库类型">
+        {(["doris", "mysql"] as const).map((type) => (
+          <button
+            aria-pressed={databaseType === type}
+            className={`h-10 min-w-28 rounded-[6px] border px-4 text-sm font-bold transition ${
+              databaseType === type
+                ? "border-[#4b5fc6] bg-[#0a1ae1] text-white"
+                : "border-[#1b255d] bg-[#070b1b] text-[#bfc9e7]/72 hover:border-[#4b5fc6] hover:text-white"
+            }`}
+            key={type}
+            onClick={() => handleDatabaseTypeChange(type)}
+            type="button"
+          >
+            {type === "doris" ? "Doris" : "MySQL"}
+          </button>
+        ))}
+      </div>
+      <div className="grid gap-4 rounded-[6px] border border-white/10 bg-[#070b1b] p-4 lg:grid-cols-[minmax(220px,0.8fr)_minmax(280px,1fr)_180px]">
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">所属环境</span>
+          <select
+            className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none disabled:opacity-60"
+            disabled={loadingInstances || environments.length === 0}
+            onChange={(event) => {
+              const nextEnvironment = event.target.value;
+              const firstInstance = instances.find(
+                (instance) => instance.environment_name === nextEnvironment,
+              );
+              setEnvironmentName(nextEnvironment);
+              setInstanceId(firstInstance ? String(firstInstance.id) : "");
+              setInventory(null);
+              setManagedPasswords({});
+              setError("");
+            }}
+            value={environmentName}
+          >
+            {environments.length === 0 ? <option value="">暂无已登记环境</option> : null}
+            {environments.map((environment) => (
+              <option key={environment} value={environment}>{environment}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">{databaseLabel} 实例</span>
+          <select
+            className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none disabled:opacity-60"
+            disabled={loadingInstances || environmentInstances.length === 0}
+            onChange={(event) => {
+              setInstanceId(event.target.value);
+              setInventory(null);
+              setManagedPasswords({});
+              setError("");
+            }}
+            value={instanceId}
+          >
+            {environmentInstances.length === 0 ? <option value="">暂无 {databaseLabel} 实例</option> : null}
+            {environmentInstances.map((instance) => (
+              <option key={instance.id} value={instance.id}>{instance.instance_name}</option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="h-11 self-end rounded-[6px] bg-[#0a1ae1] px-4 text-sm font-black text-white transition hover:bg-[#1628ff] disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={!instanceId || querying || loadingInstances}
+          onClick={handleLoadAccounts}
+          type="button"
+        >
+          {querying ? "正在查询..." : "获取账号列表"}
+        </button>
+      </div>
+
+      {loadingInstances ? <p className="mt-5 border border-white/10 px-4 py-10 text-center text-sm text-[#bfc9e7]/64">正在加载已登记的 {databaseLabel} 实例...</p> : null}
+      {!loadingInstances && instances.length === 0 && !error ? <p className="mt-5 border border-dashed border-white/14 px-4 py-10 text-center text-sm text-[#bfc9e7]/64">请先在后台管理页面添加 {databaseLabel} 连接信息。</p> : null}
+      {error ? <p className="mt-5 rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-4 py-3 text-sm text-[#ff9aa3]">{error}</p> : null}
+      {querying ? <p className="mt-5 border border-white/10 px-4 py-10 text-center text-sm text-[#bfc9e7]/64">正在连接 {databaseLabel} 并读取账号信息...</p> : null}
+
+      {inventory && !querying ? (
+        <div className="mt-5 overflow-x-auto">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-xs text-[#bfc9e7]/58">
+            <span>{inventory.instance.environment_name} / {inventory.instance.instance_name}</span>
+            <span>{inventory.account_count} 个账号</span>
+          </div>
+          <table className={`w-full text-left text-sm ${isSuperuser ? "min-w-[1980px]" : "min-w-[1120px]"}`}>
+            <thead className="text-xs text-[#bfc9e7]/52">
+              <tr className="border-b border-white/10">
+                <th className="py-3 pr-5">用户名</th>
+                <th className="py-3 pr-5">Host</th>
+                <th className="py-3 pr-5">用户标识</th>
+                <th className="py-3 pr-5">备注</th>
+                {isSuperuser ? <th className="w-[500px] py-3 pr-5">当前密码</th> : null}
+                {isSuperuser ? <th className="w-[460px] py-3">密码对比</th> : null}
+              </tr>
+            </thead>
+            <tbody>
+              {inventory.accounts.map((account) => {
+                const check = passwordChecks[account.user_identity] ?? {
+                  password: "",
+                  status: "idle",
+                  message: "",
+                };
+                const managed = managedPasswords[account.user_identity] ?? {
+                  value: "",
+                  visible: false,
+                  editing: false,
+                  status: "idle",
+                  message: "",
+                };
+                const busy = check.status === "checking" || check.status === "resetting";
+                return (
+                  <tr className="border-b border-white/8 align-top text-[#bfc9e7]/78" key={account.user_identity}>
+                    <td className="break-all py-4 pr-5 font-bold text-white">{account.username || "未识别"}</td>
+                    <td className="break-all py-4 pr-5 font-mono text-xs">{account.host || "-"}</td>
+                    <td className="break-all py-4 pr-5 font-mono text-xs text-[#9fb0ff]">{account.user_identity}</td>
+                    <td className="break-words py-4 pr-5">{account.comment || "-"}</td>
+                    {isSuperuser ? (
+                      <td className="py-4 pr-5">
+                        {account.password_managed && !managed.editing ? (
+                          <>
+                            <div className="flex min-h-10 items-start gap-2">
+                              <input
+                                autoComplete="off"
+                                className="h-10 min-w-0 flex-1 rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none"
+                                placeholder="已托管"
+                                readOnly
+                                type={managed.visible ? "text" : "password"}
+                                value={managed.value}
+                              />
+                              <button
+                                className="h-10 shrink-0 rounded-[6px] border border-[#4b5fc6] px-3 text-xs font-bold text-[#bfc9e7] disabled:opacity-50"
+                                disabled={managed.status === "loading"}
+                                onClick={() => handleManagedPassword(account, "view")}
+                                title={managed.visible ? "隐藏当前密码" : "显示当前密码"}
+                                type="button"
+                              >
+                                {managed.status === "loading" ? "读取中" : managed.visible ? "隐藏" : "显示"}
+                              </button>
+                              <button
+                                className="h-10 shrink-0 rounded-[6px] border border-[#4b5fc6] px-3 text-xs font-bold text-[#bfc9e7] disabled:opacity-50"
+                                disabled={managed.status === "loading"}
+                                onClick={() => handleManagedPassword(account, "copy")}
+                                title="复制当前密码"
+                                type="button"
+                              >
+                                复制
+                              </button>
+                              <button
+                                className="h-10 shrink-0 rounded-[6px] border border-[#4b5fc6] px-3 text-xs font-bold text-[#bfc9e7] disabled:opacity-50"
+                                disabled={managed.status === "loading"}
+                                onClick={() => updateManagedPassword(account.user_identity, {
+                                  value: "",
+                                  visible: false,
+                                  editing: true,
+                                  status: "idle",
+                                  message: "",
+                                })}
+                                title="手工更新平台登记的当前密码"
+                                type="button"
+                              >
+                                更新
+                              </button>
+                            </div>
+                            {account.password_updated_at ? (
+                              <p className="mt-2 text-xs text-[#bfc9e7]/42">更新于 {formatDateTime(account.password_updated_at)}</p>
+                            ) : null}
+                            {managed.message ? (
+                              <p className={`mt-2 text-xs ${managed.status === "error" ? "text-[#ff9aa3]" : "text-[#6ce5b1]"}`}>{managed.message}</p>
+                            ) : null}
+                          </>
+                        ) : (
+                          <>
+                            <div className="flex min-h-10 items-start gap-2">
+                              <input
+                                autoComplete="new-password"
+                                className="h-10 min-w-0 flex-1 rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none focus:border-[#4b5fc6]"
+                                disabled={managed.status === "loading"}
+                                onChange={(event) => updateManagedPassword(account.user_identity, {
+                                  value: event.target.value,
+                                  visible: false,
+                                  status: "idle",
+                                  message: "",
+                                })}
+                                placeholder="输入当前密码"
+                                type="password"
+                                value={managed.value}
+                              />
+                              <button
+                                className="h-10 shrink-0 rounded-[6px] bg-[#0a1ae1] px-3 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                                disabled={!managed.value || managed.status === "loading"}
+                                onClick={() => handleSaveManagedPassword(account)}
+                                type="button"
+                              >
+                                {managed.status === "loading" ? "保存中" : "保存"}
+                              </button>
+                              {account.password_managed ? (
+                                <button
+                                  className="h-10 shrink-0 rounded-[6px] border border-[#4b5fc6] px-3 text-xs font-bold text-[#bfc9e7]"
+                                  onClick={() => updateManagedPassword(account.user_identity, {
+                                    value: "",
+                                    editing: false,
+                                    status: "idle",
+                                    message: "",
+                                  })}
+                                  type="button"
+                                >
+                                  取消
+                                </button>
+                              ) : null}
+                            </div>
+                            {managed.message ? <p className="mt-2 text-xs text-[#ff9aa3]">{managed.message}</p> : null}
+                          </>
+                        )}
+                      </td>
+                    ) : null}
+                    {isSuperuser ? (
+                      <td className="py-4">
+                        <div className="flex min-h-10 items-start gap-2">
+                          <input
+                            autoComplete="new-password"
+                            className="h-10 min-w-0 flex-1 rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none focus:border-[#4b5fc6]"
+                            disabled={busy}
+                            onChange={(event) => updatePasswordCheck(account.user_identity, {
+                              password: event.target.value,
+                              status: "idle",
+                              message: "",
+                            })}
+                            placeholder="输入曾发放的密码"
+                            type="password"
+                            value={check.password}
+                          />
+                          <button
+                            className="h-10 shrink-0 rounded-[6px] border border-[#4b5fc6] px-3 text-xs font-bold text-[#bfc9e7] disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={!check.password || busy}
+                            onClick={() => handleVerifyPassword(account)}
+                            type="button"
+                          >
+                            {check.status === "checking" ? "校验中..." : "对比"}
+                          </button>
+                          {check.status === "mismatch" || check.status === "resetting" ? (
+                            <button
+                              className="h-10 shrink-0 rounded-[6px] bg-[#a30613] px-3 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={busy}
+                              onClick={() => handleResetPassword(account)}
+                              type="button"
+                            >
+                              {check.status === "resetting" ? "同步中..." : "同步此密码"}
+                            </button>
+                          ) : null}
+                        </div>
+                        {check.message ? (
+                          <p className={`mt-2 text-xs ${check.status === "matched" ? "text-[#6ce5b1]" : "text-[#ff9aa3]"}`}>
+                            {check.message}
+                          </p>
+                        ) : null}
+                      </td>
+                    ) : null}
+                  </tr>
+                );
+              })}
+              {inventory.accounts.length === 0 ? <tr><td className="py-10 text-center text-[#bfc9e7]/52" colSpan={isSuperuser ? 6 : 4}>该 {databaseLabel} 实例没有返回账号信息</td></tr> : null}
+            </tbody>
+          </table>
+          <p className="mt-4 text-xs text-[#bfc9e7]/48">当前密码可以手工加密登记，也会在校验成功或同步修改后自动更新；手工登记不会修改 {databaseLabel} 密码。</p>
+        </div>
+      ) : null}
+    </SectionBlock>
   );
 }
 
@@ -1127,7 +2202,7 @@ function ImageInventoryView() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchApi<K8sHostOption[]>("/api/k8s/hosts", controller.signal)
+    fetchUserApi<K8sHostOption[]>("/api/k8s/hosts", controller.signal)
       .then((rows) => {
         setHosts(rows);
         setLoadingNamespaces(rows.length > 0);
@@ -1148,7 +2223,7 @@ function ImageInventoryView() {
       return;
     }
     const controller = new AbortController();
-    fetchApi<{ namespaces: string[] }>(`/api/k8s/namespaces?host_id=${hostId}`, controller.signal)
+    fetchUserApi<{ namespaces: string[] }>(`/api/k8s/namespaces?host_id=${hostId}`, controller.signal)
       .then((data) => {
         setNamespaces(data.namespaces);
         setNamespace(data.namespaces[0] ?? "");
@@ -1171,7 +2246,7 @@ function ImageInventoryView() {
     setHasQueried(false);
     setError("");
     try {
-      const data = await fetchApi<{ images: ControllerImage[] }>(
+      const data = await fetchUserApi<{ images: ControllerImage[] }>(
         `/api/k8s/images?host_id=${hostId}&namespace=${encodeURIComponent(namespace)}`,
       );
       setImages(data.images);
@@ -1259,15 +2334,6 @@ function ImageInventoryView() {
   );
 }
 
-async function fetchApi<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, { signal });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.detail ?? `接口请求失败：${path}`);
-  }
-  return response.json() as Promise<T>;
-}
-
 async function fetchUserApi<T>(path: string, signal?: AbortSignal): Promise<T> {
   const session = readUserWebSession();
   if (!session) {
@@ -1284,6 +2350,45 @@ async function fetchUserApi<T>(path: string, signal?: AbortSignal): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function mutateUserApi<T>(
+  path: string,
+  method: "POST" | "PUT",
+  body: Record<string, unknown>,
+): Promise<T> {
+  const session = readUserWebSession();
+  if (!session) {
+    throw new Error("用户端会话已失效，请重新登录");
+  }
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${session.access_token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail ?? `接口请求失败：${path}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 function MiddlewareSystemView({
   activePage,
   onSetActivePage,
@@ -1298,6 +2403,20 @@ function MiddlewareSystemView({
   const [nacosLoading, setNacosLoading] = useState(false);
   const [nacosInstancesLoading, setNacosInstancesLoading] = useState(true);
   const [nacosError, setNacosError] = useState("");
+  const [nacosStructure, setNacosStructure] = useState<NacosConfigStructure | null>(null);
+  const [nacosStructureLoading, setNacosStructureLoading] = useState(false);
+  const [nacosStructureError, setNacosStructureError] = useState("");
+  const [expandedNacosConfigKey, setExpandedNacosConfigKey] = useState("");
+  const nacosStructureRequestId = useRef(0);
+  const nacosTableScrollRef = useRef<HTMLDivElement>(null);
+
+  function clearNacosStructure() {
+    nacosStructureRequestId.current += 1;
+    setExpandedNacosConfigKey("");
+    setNacosStructure(null);
+    setNacosStructureError("");
+    setNacosStructureLoading(false);
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1328,6 +2447,7 @@ function MiddlewareSystemView({
     setNacosError("");
     setNacosCatalog(null);
     setSelectedNamespaceId("");
+    clearNacosStructure();
     try {
       const catalog = await fetchUserApi<NacosCatalog>(
         `/api/nacos/instances/${selectedNacosId}/catalog`,
@@ -1338,6 +2458,55 @@ function MiddlewareSystemView({
       setNacosError(loadError instanceof Error ? loadError.message : "Nacos 配置目录获取失败");
     } finally {
       setNacosLoading(false);
+    }
+  }
+
+  async function handleLoadNacosStructure(config: {
+    group: string;
+    data_id: string;
+    type: string;
+  }) {
+    if (!selectedNacosId || !selectedNamespace) {
+      return;
+    }
+    const configKey = `${selectedNamespace.namespace_id}\u001f${config.group}\u001f${config.data_id}`;
+    if (expandedNacosConfigKey === configKey) {
+      clearNacosStructure();
+      return;
+    }
+    const requestId = nacosStructureRequestId.current + 1;
+    nacosStructureRequestId.current = requestId;
+    setExpandedNacosConfigKey(configKey);
+    window.requestAnimationFrame(() => {
+      nacosTableScrollRef.current?.scrollTo({ left: 0, behavior: "smooth" });
+    });
+    setNacosStructureLoading(true);
+    setNacosStructure(null);
+    setNacosStructureError("");
+    try {
+      const structure = await mutateUserApi<NacosConfigStructure>(
+        `/api/nacos/instances/${selectedNacosId}/config-structure`,
+        "POST",
+        {
+          namespace_id: selectedNamespace.namespace_id,
+          group: config.group,
+          data_id: config.data_id,
+          config_type: config.type,
+        },
+      );
+      if (nacosStructureRequestId.current === requestId) {
+        setNacosStructure(structure);
+      }
+    } catch (loadError) {
+      if (nacosStructureRequestId.current === requestId) {
+        setNacosStructureError(
+          loadError instanceof Error ? loadError.message : "Nacos 配置结构获取失败",
+        );
+      }
+    } finally {
+      if (nacosStructureRequestId.current === requestId) {
+        setNacosStructureLoading(false);
+      }
     }
   }
 
@@ -1354,7 +2523,7 @@ function MiddlewareSystemView({
       <SubPageNav activeKey={activePage} items={pages} onChange={onSetActivePage} />
 
       {activePage === "nacosKeys" ? (
-        <SectionBlock title="Nacos 配置目录" description="选择后台已登记的环境，查询 Namespace、Group、配置名称与格式。该页面不读取或展示配置内容。">
+        <SectionBlock title="Nacos 配置目录" description="选择后台已登记的环境，查询 Namespace、Group、配置名称与格式；点击配置右侧的查看内容，在当前配置下方展开已清空 value 的结构。">
         <div className="grid gap-4 xl:grid-cols-[360px_1fr]">
           <div className="rounded-[6px] border border-white/10 bg-[#070b1b] p-4">
             <label className="block">
@@ -1367,6 +2536,7 @@ function MiddlewareSystemView({
                   setNacosCatalog(null);
                   setSelectedNamespaceId("");
                   setNacosError("");
+                  clearNacosStructure();
                 }}
                 value={selectedNacosId}
               >
@@ -1387,7 +2557,7 @@ function MiddlewareSystemView({
               {nacosLoading ? "正在获取配置目录..." : "获取 Namespace 与配置"}
             </button>
             <p className="mt-3 text-xs leading-5 text-[#bfc9e7]/54">
-              仅返回配置元数据，不返回配置正文及任何 value。
+              目录只返回元数据；配置正文仅在点击后由服务端解析，浏览器只接收脱敏结构。
             </p>
             {nacosError ? <p className="mt-4 rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-3 py-3 text-sm text-[#ff9aa3]">{nacosError}</p> : null}
           </div>
@@ -1418,7 +2588,10 @@ function MiddlewareSystemView({
                                 : "border-white/10 bg-[#04050b] text-[#bfc9e7]/68 hover:border-[#4b5fc6]/60 hover:text-white"
                             }`}
                             key={namespace.namespace_id}
-                            onClick={() => setSelectedNamespaceId(namespace.namespace_id)}
+                            onClick={() => {
+                              setSelectedNamespaceId(namespace.namespace_id);
+                              clearNacosStructure();
+                            }}
                             role="tab"
                             type="button"
                           >
@@ -1441,20 +2614,100 @@ function MiddlewareSystemView({
                       </div>
                       <span className="text-xs text-[#bfc9e7]/60">{selectedNamespace.config_count} 个配置</span>
                     </div>
-                    <div className="overflow-x-auto px-5 pb-4">
-                      <table className="w-full min-w-[620px] text-left text-sm">
+                    <div className="overflow-x-auto px-5 pb-4" ref={nacosTableScrollRef}>
+                      <table className="w-full min-w-[760px] text-left text-sm">
                         <thead className="text-xs text-[#bfc9e7]/52">
-                          <tr className="border-b border-white/10"><th className="w-[28%] py-3 pr-4">Group</th><th className="py-3 pr-4">配置名称</th><th className="w-28 py-3">格式</th></tr>
+                          <tr className="border-b border-white/10">
+                            <th className="w-[28%] py-3 pr-4">Group</th>
+                            <th className="py-3 pr-4">配置名称</th>
+                            <th className="w-24 py-3 pr-4">格式</th>
+                            <th className="w-28 py-3 text-right">操作</th>
+                          </tr>
                         </thead>
                         <tbody>
-                          {selectedNamespace.configs.map((config) => (
-                            <tr className="border-b border-white/8 text-[#bfc9e7]/78 last:border-b-0" key={`${config.group}-${config.data_id}`}>
-                              <td className="break-all py-3 pr-4 font-mono text-xs">{config.group}</td>
-                              <td className="break-all py-3 pr-4 font-mono text-xs font-bold text-[#9fb0ff]">{config.data_id}</td>
-                              <td className="py-3 text-xs uppercase">{config.type}</td>
-                            </tr>
-                          ))}
-                          {selectedNamespace.configs.length === 0 ? <tr><td className="py-6 text-center text-[#bfc9e7]/52" colSpan={3}>该 Namespace 暂无配置</td></tr> : null}
+                          {selectedNamespace.configs.map((config) => {
+                            const configKey = `${selectedNamespace.namespace_id}\u001f${config.group}\u001f${config.data_id}`;
+                            const supported = ["yaml", "yml", "json"].includes(config.type.toLowerCase());
+                            const expanded = expandedNacosConfigKey === configKey;
+                            return (
+                              <Fragment key={configKey}>
+                                <tr className={`border-b border-white/8 text-[#bfc9e7]/78 ${expanded ? "bg-[#0a1028]" : ""}`}>
+                                  <td className="break-all py-3 pr-4 font-mono text-xs">{config.group}</td>
+                                  <td className="break-all py-3 pr-4 font-mono text-xs font-bold text-[#9fb0ff]">{config.data_id}</td>
+                                  <td className="py-3 pr-4 text-xs uppercase">{config.type}</td>
+                                  <td className="py-2 text-right">
+                                    {supported ? (
+                                      <button
+                                        aria-expanded={expanded}
+                                        className={`h-8 rounded-[6px] border px-3 text-xs font-bold transition ${
+                                          expanded
+                                            ? "border-[#4b5fc6] bg-[#0a1ae1] text-white"
+                                            : "border-[#29356f] text-[#9fb0ff] hover:border-[#4b5fc6] hover:text-white"
+                                        }`}
+                                        onClick={() => handleLoadNacosStructure(config)}
+                                        type="button"
+                                      >
+                                        {expanded ? "收起" : "查看内容"}
+                                      </button>
+                                    ) : (
+                                      <button
+                                        className="h-8 rounded-[6px] border border-white/8 px-3 text-xs text-[#bfc9e7]/34"
+                                        disabled
+                                        title="当前仅支持 YAML、YML 和 JSON"
+                                        type="button"
+                                      >
+                                        暂不支持
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+                                {expanded ? (
+                                  <tr className="border-b border-[#29356f]/70">
+                                    <td className="p-0" colSpan={4}>
+                                      <div className="bg-[#04050b] px-4 py-4">
+                                        {nacosStructureLoading ? (
+                                          <p className="border border-white/10 px-4 py-8 text-center text-sm text-[#bfc9e7]/64">
+                                            正在读取并脱敏配置结构...
+                                          </p>
+                                        ) : null}
+                                        {nacosStructureError ? (
+                                          <p className="rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-3 py-3 text-sm text-[#ff9aa3]">
+                                            {nacosStructureError}
+                                          </p>
+                                        ) : null}
+                                        {nacosStructure && !nacosStructureLoading ? (
+                                          <div className="min-w-0 overflow-hidden rounded-[6px] border border-[#1b255d] bg-[#050817]">
+                                            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/10 px-4 py-3">
+                                              <div className="min-w-0">
+                                                <p className="break-all font-mono text-sm font-bold text-white">{nacosStructure.data_id}</p>
+                                                <p className="mt-1 break-all font-mono text-xs text-[#bfc9e7]/54">
+                                                  {nacosStructure.group} / {nacosStructure.format.toUpperCase()}
+                                                </p>
+                                              </div>
+                                              <div className="flex items-center gap-3">
+                                                <span className="text-xs font-bold text-[#7dd3fc]">{nacosStructure.key_count} 个 Key</span>
+                                                <button
+                                                  className="h-8 rounded-[6px] border border-[#29356f] px-3 text-xs font-bold text-[#9fb0ff] hover:border-[#4b5fc6] hover:text-white"
+                                                  onClick={clearNacosStructure}
+                                                  type="button"
+                                                >
+                                                  收起
+                                                </button>
+                                              </div>
+                                            </div>
+                                            <pre className="max-h-[520px] overflow-auto whitespace-pre p-4 font-mono text-xs leading-6 text-[#c9d2f0]">
+                                              {nacosStructure.structure}
+                                            </pre>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ) : null}
+                              </Fragment>
+                            );
+                          })}
+                          {selectedNamespace.configs.length === 0 ? <tr><td className="py-6 text-center text-[#bfc9e7]/52" colSpan={4}>该 Namespace 暂无配置</td></tr> : null}
                         </tbody>
                       </table>
                     </div>

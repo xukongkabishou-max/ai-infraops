@@ -5,7 +5,7 @@ AI InfraOps 采用 monorepo 结构，前端、后端服务、共享包、基础�
 ## 前端
 
 - `apps/admin-web`：普通用户控制台，用于展示机器信息、业务系统、中间件系统和监控系统集成等运维视图。
-- `apps/backend-admin-web`：后台管理控制台，维护 RBAC、环境主机、K8S 凭证和 Nacos 连接信息，并预留账号资产和权限范围入口。
+- `apps/backend-admin-web`：后台管理控制台，维护 RBAC、环境主机、K8S 凭证以及 Nacos、Doris 连接信息，并预留更多账号资产和权限范围入口。
 - `apps/user-web`：普通用户门户，用于自助查看资源、申请权限、执行被授权的运维动作。
 
 ### 普通用户控制台功能骨架
@@ -51,17 +51,20 @@ AI InfraOps 采用 monorepo 结构，前端、后端服务、共享包、基础�
 - kubeconfig 不以明文入库、不入 Git。后端使用 AES-256-GCM 加密后，将密文、随机 nonce、指纹和原文件名保存到 `k8s_clusters`；主密钥只从 `.env` 读取。
 - 当前管理端采用一个完整主机表单：可粘贴 kubeconfig 文本，并通过列表“编辑”更新已有属性；编辑时凭证留空即保留原值。
 - namespace 和 Running Pod 镜像列表来自 K8S API 实时查询，只按 Deployment、StatefulSet、DaemonSet 聚合 Pod 名称、副本数和容器完整镜像，不创建镜像事实表。
+- K8S 节点资源查询通过 kubeconfig 实时列出 Node，并自动发现 Prometheus Service；后端经 K8S Service Proxy 只读查询 node-exporter 指标。有凭证时返回整个集群，无凭证时回退到单机 node-exporter，指标结果不写入事实表。
 - NodePort 列表同样来自 K8S API 实时查询，每个 Service 端口独立返回，公网地址由 `machine_hosts.public_ip` 与 `nodePort` 拼接；当前普通用户默认可见全部 Namespace，后续由后端展示策略过滤并合并注释。
 - 环境变量查询只支持 Deployment、StatefulSet。后端验证 Namespace 白名单后选择一个 Running Pod，并在容器内移除 value，只返回容器名和 Key；该链路要求 `pods/exec` 权限，因此应使用独立、最小权限的 K8S ServiceAccount。
 
 ## 中间件凭证边界
 
-- `middleware_instances.environment_id` 复用环境主数据，当前第一种接入类型为 Nacos。
-- Nacos 密码使用 AES-256-GCM 加密后保存，查询接口只选择环境、类型、名称、URL、用户名和状态等公开字段。
+- `middleware_instances.environment_id` 复用环境主数据，当前接入类型为 Nacos、Doris 和 MySQL；MySQL 实例额外保存 mysql-exporter 地址，为后续指标查询提供数据来源。
+- 中间件密码使用 AES-256-GCM 加密后保存，管理列表接口只选择环境、类型、名称、URL、用户名和状态等公开字段。
 - 密码明文只存在于管理端提交和后端请求处理期间，不写日志、不回显、不进入 Git。
 - 中间件实例接口要求后台管理会话，并按列表、新增、删除操作检查 `middleware:*` 权限。
 - `configured` 表示已登记，不等于连通；配置目录查询由 Nacos adapter 更新 `active` 或 `unreachable`。
 - 普通用户端只能通过 `user_web` 会话和 `nacos:catalog:list` 权限访问 Nacos 目录接口。环境列表不返回 URL 和用户名，目录响应使用字段白名单，仅保留 Namespace、Group、DataId 和格式。
+- Doris 用户端接口使用 `doris:accounts:list` 权限，通过 FE MySQL 协议执行 `SHOW ALL GRANTS`；只返回账号标识、Host、备注等安全字段，不返回登记连接、密码、密码哈希或 Doris 的 `Password` 列。
+- MySQL 用户端接口使用 `mysql:accounts:list` 权限，只查询 `mysql.user` 中的账号标识、Host、认证插件和状态字段，不查询或返回认证哈希。Doris/MySQL 的当前密码托管、显示、校验和同步仅限超级管理员，并分别使用独立密文域和审计表。
 
 ## 日志与诊断边界
 

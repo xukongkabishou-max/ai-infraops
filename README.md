@@ -4,10 +4,11 @@ AI InfraOps 是一个面向统一运维的长期项目，目标是把集群、�
 
 ## 当前状态
 
-- `apps/admin-web`：普通用户控制台，登录页已接入 FastAPI RBAC 校验；“镜像 tag”“Pod 环境变量 Key”和“Nacos 配置目录”已接入真实数据。
-- `apps/backend-admin-web`：后端 RBAC 管理页面，运行在 `3001` 端口；维护环境主机、K8S 凭证，并已支持加密登记 Nacos 连接信息。
+- `apps/admin-web`：普通用户控制台，登录页和动态菜单已接入 FastAPI RBAC；研发只显示业务系统和中间件系统，运维可查看全部功能。
+- `apps/backend-admin-web`：后端 RBAC 管理页面，运行在 `3001` 端口；维护环境主机、K8S 凭证和中间件连接信息，并提供安全审计日志。
 - `apps/user-web`：预留给普通用户门户。
-- `services/backend`：FastAPI + MySQL 后端，当前覆盖 RBAC、机器资源、环境主机、K8S 凭证、Running Pod 镜像与环境变量 Key 查询、Nacos 实例登记与配置目录查询。
+- `services/backend`：FastAPI + MySQL 后端，当前覆盖 RBAC、机器资源、环境主机、K8S 凭证、Running Pod 镜像与环境变量 Key 查询、Nacos 配置目录以及 Doris/MySQL 账号查询。
+- `services/linux-agent`：部署到 Linux 主机的只读 Go Agent，提供本地账号清单与数量，不读取密码哈希。
 - `services`：后续可以按语言和领域继续拆分服务。
 - `docs`：记录架构、vibecoding 过程、参考项目和知识点。
 - `md-assets`：只放 Markdown 文档引用的截图、设计图和静态图片。
@@ -97,11 +98,19 @@ PUT    /api/hosts/{host_id}       更新已有主机；凭证留空时保留原�
 POST   /api/hosts/{host_id}/probe 重新检测 node-exporter 并更新连接原因
 DELETE /api/hosts/{host_id}       删除主机
 GET    /api/hosts/{host_id}/metrics 查看 CPU 使用率、内存使用率、/ 目录磁盘使用率及对应容量详情
+GET    /api/resources/hosts         用户端查看可查询的集群或独立主机入口
+GET    /api/resources/hosts/{host_id}/metrics 用户端查询整个 K8S 集群或独立主机资源
+GET    /api/linux-accounts/hosts              用户端查看已配置账号 Agent 的主机
+GET    /api/linux-accounts/hosts/{host_id}    实时查询指定主机的本地账号清单
 ```
 
 node-exporter 可以稳定提供 CPU 累计时间、CPU 核数、内存、磁盘、系统内核和 `node_uname_info` 里的 nodename。CPU 使用率当前通过短间隔采样 `node_cpu_seconds_total`，按非 idle 时间占比计算；内存和磁盘使用率按已用/总量计算。公网 IP 当前从填写的 exporter URL 推断；私网 IP 不建议依赖 node-exporter 自动识别，后台添加主机时保留手动填写字段。
 
+用户端“集群与主机资源”会判断主机是否绑定 K8S 凭证：有凭证时通过 K8S Service Proxy 自动发现 Prometheus，实时查询整个集群所有 Node 的最近 5 分钟 CPU 使用率、内存和根目录容量；无凭证时回退到该主机的 node-exporter。单节点 K8S 返回一项，多节点返回全部节点，缺少指标的节点仍会展示并标明原因。详细设计见 `docs/vibecoding/k8s-node-resource-inventory.md`。
+
 FastAPI 会将请求耗时、请求 ID、主机探测和异常写入 `.local/logs/backend.log`，并按文件大小自动滚动。后台管理页面直接展示 `last_error` 中的连接失败原因，并提供“重新检测”操作；日志不会记录请求体、密码和 kubeconfig。
+
+后台主机表单可以选填“主机用户管理地址”。普通用户端按环境和主机查询时，FastAPI 使用仅保存在 `.env` 的 Bearer Token 调用 Go Agent；浏览器不会获得 Agent 地址或 Token。当前只读取 `/etc/passwd`，详细边界见 `docs/vibecoding/linux-account-agent.md`。
 
 ## K8S 镜像查询
 
@@ -136,13 +145,30 @@ KubeKey kubeconfig 将 API Server 域名替换为外部可达 IP 后，如果证
 
 ```text
 GET    /api/middleware/instances              查看已登记的中间件实例
-POST   /api/middleware/instances              添加 Nacos 连接信息
+POST   /api/middleware/instances              添加 Nacos、Doris 或 MySQL 连接信息
 DELETE /api/middleware/instances/{instance_id} 删除连接信息
 GET    /api/nacos/instances                   用户端获取已登记的 Nacos 环境
 GET    /api/nacos/instances/{instance_id}/catalog 实时读取 Namespace、Group、DataId 和格式
 ```
 
 目录接口使用 `user_web` Bearer 会话和 `nacos:catalog:list` 权限。FastAPI 只映射 Nacos 元数据接口中的 Namespace、Group、DataId 和格式，显式丢弃 `content`、MD5 等其他字段；不会把 URL、用户名、密码或配置正文返回浏览器。详细边界见 `docs/vibecoding/nacos-connection-management.md`。
+
+## Doris 账号信息
+
+后台在同一个中间件实例表单中切换到 Doris，登记所属环境、实例名称、FE Host、查询端口、管理用户名和密码。密码沿用中间件 AES-256-GCM 加密机制，用户端只获取环境和实例选项。
+
+```text
+GET /api/doris/instances
+GET /api/doris/instances/{instance_id}/accounts
+```
+
+账号接口通过 Doris FE 的 MySQL 协议执行 `SHOW ALL GRANTS`，要求登记账号具有查看全部用户授权的 `GRANT_PRIV`。响应只保留用户标识、Host、备注、角色和授权范围，明确丢弃 `Password` 列；Doris 密码不可逆，也不会返回密码或密码哈希。完整边界见 `docs/vibecoding/doris-account-inventory.md`。
+
+## MySQL 实例与账号
+
+后台中间件实例表单支持登记所属环境、实例名称、MySQL Host、连接端口、管理用户名、管理密码和 `mysql-exporter URL`。管理密码使用现有 AES-256-GCM 机制加密保存，Exporter 地址作为后续指标展示的非敏感元数据单独保存。
+
+普通用户端的“中间件账号获取”可以切换 Doris/MySQL，按所属环境和实例实时查询 MySQL 用户标识、Host、认证插件和账号状态。超级管理员还可加密登记当前密码、显示/复制、通过目标账号登录校验，并通过登记管理账号执行 `ALTER USER` 同步密码。账号列表不会读取或返回 MySQL 密码哈希；详细边界见 `docs/vibecoding/mysql-instance-management.md`。
 
 ## 普通用户控制台功能骨架
 

@@ -41,9 +41,11 @@ type HostRecord = {
   public_ip: string;
   private_ip: string;
   node_exporter_url: string;
+  linux_agent_url: string;
   namespace_keys?: string[];
   status: "active" | "unreachable";
   has_k8s_credential?: boolean | number;
+  k8s_credential_name?: string | null;
   last_error?: string | null;
   last_seen_at?: string | null;
 };
@@ -64,15 +66,39 @@ type HostNotice = {
 type MiddlewareInstance = {
   id: number;
   environment_name: string;
-  middleware_type: string;
+  middleware_type: "nacos" | "doris" | "mysql";
   instance_name: string;
   base_url: string;
+  exporter_url?: string | null;
   username: string;
   status: "configured" | "active" | "unreachable" | "disabled";
   credential_configured: boolean | number;
   last_error?: string | null;
   last_seen_at?: string | null;
   created_at: string;
+};
+
+type AuditEvent = {
+  id: number;
+  request_id: string;
+  actor_username: string;
+  role_codes?: string[] | null;
+  client_type: string;
+  action: string;
+  permission_code: string;
+  request_method: string;
+  request_path: string;
+  result: "success" | "denied" | "error";
+  status_code: number;
+  source_ip: string;
+  created_at: string;
+};
+
+type AuditEventPage = {
+  items: AuditEvent[];
+  total: number;
+  page: number;
+  page_size: number;
 };
 
 const apiBaseUrl =
@@ -88,6 +114,7 @@ const navItems = [
   "菜单管理",
   "机器资源信息",
   "中间件资源信息",
+  "审计日志",
 ];
 
 const fallbackUsers: ApiUser[] = [
@@ -107,12 +134,15 @@ export default function BackendAdminHome() {
   const [menus, setMenus] = useState<ApiMenu[]>([]);
   const [hosts, setHosts] = useState<HostRecord[]>([]);
   const [hostUrl, setHostUrl] = useState("");
+  const [linuxAgentUrl, setLinuxAgentUrl] = useState("");
   const [hostName, setHostName] = useState("");
   const [publicIp, setPublicIp] = useState("");
   const [privateIp, setPrivateIp] = useState("");
   const [environmentName, setEnvironmentName] = useState("");
   const [namespaceKeysText, setNamespaceKeysText] = useState("");
   const [k8sCredentialContent, setK8sCredentialContent] = useState("");
+  const [editingK8sCredentialName, setEditingK8sCredentialName] = useState("");
+  const [editingHasK8sCredential, setEditingHasK8sCredential] = useState(false);
   const [editingHostId, setEditingHostId] = useState<number | null>(null);
   const [hostError, setHostError] = useState("");
   const [hostNotice, setHostNotice] = useState<HostNotice | null>(null);
@@ -195,7 +225,9 @@ export default function BackendAdminHome() {
   }, []);
 
   async function fetchJson<T>(path: string): Promise<T> {
-    const response = await fetch(`${apiBaseUrl}${path}`);
+    const response = await fetch(`${apiBaseUrl}${path}`, {
+      headers: backendAdminAuthHeaders(),
+    });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       throw new Error(data.detail ?? `接口请求失败：${path}`);
@@ -270,9 +302,10 @@ export default function BackendAdminHome() {
     try {
       const response = await fetch(`${apiBaseUrl}/api/hosts${editingHostId ? `/${editingHostId}` : ""}`, {
         method: editingHostId ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: backendAdminAuthHeaders(true),
         body: JSON.stringify({
           node_exporter_url: hostUrl,
+          linux_agent_url: linuxAgentUrl,
           hostname: hostName,
           public_ip: publicIp,
           private_ip: privateIp,
@@ -306,23 +339,29 @@ export default function BackendAdminHome() {
   function resetHostForm() {
     setEditingHostId(null);
     setHostUrl("");
+    setLinuxAgentUrl("");
     setHostName("");
     setPublicIp("");
     setPrivateIp("");
     setEnvironmentName("");
     setNamespaceKeysText("");
     setK8sCredentialContent("");
+    setEditingK8sCredentialName("");
+    setEditingHasK8sCredential(false);
   }
 
   function handleEditHost(host: HostRecord) {
     setEditingHostId(host.id);
     setHostUrl(host.node_exporter_url);
+    setLinuxAgentUrl(host.linux_agent_url ?? "");
     setHostName(host.hostname);
     setPublicIp(host.public_ip);
     setPrivateIp(host.private_ip);
     setEnvironmentName(host.environment_name ?? "");
     setNamespaceKeysText((host.namespace_keys ?? []).join(", "));
     setK8sCredentialContent("");
+    setEditingK8sCredentialName(host.k8s_credential_name ?? "");
+    setEditingHasK8sCredential(Boolean(host.has_k8s_credential));
     setHostError("");
     setHostNotice(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -335,6 +374,7 @@ export default function BackendAdminHome() {
     try {
       const response = await fetch(`${apiBaseUrl}/api/hosts/${hostId}/probe`, {
         method: "POST",
+        headers: backendAdminAuthHeaders(),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -363,6 +403,7 @@ export default function BackendAdminHome() {
     setHostNotice(null);
     const response = await fetch(`${apiBaseUrl}/api/hosts/${hostId}`, {
       method: "DELETE",
+      headers: backendAdminAuthHeaders(),
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
@@ -487,6 +528,8 @@ export default function BackendAdminHome() {
                   ? "添加、删除与检查环境主机"
                   : activeNav === "中间件资源信息"
                     ? "维护中间件实例、账号与权限"
+                    : activeNav === "审计日志"
+                      ? "查询登录、鉴权与接口访问记录"
                     : "登录、用户、角色、权限、菜单"}
               </h1>
             </div>
@@ -509,11 +552,14 @@ export default function BackendAdminHome() {
               <MachineHostManager
                 environmentName={environmentName}
                 editingHostId={editingHostId}
+                editingHasK8sCredential={editingHasK8sCredential}
+                editingK8sCredentialName={editingK8sCredentialName}
                 hostError={hostError}
                 hostNotice={hostNotice}
                 hostName={hostName}
                 hostSaving={hostSaving}
                 hostUrl={hostUrl}
+                linuxAgentUrl={linuxAgentUrl}
                 hosts={hosts}
                 privateIp={privateIp}
                 publicIp={publicIp}
@@ -528,6 +574,7 @@ export default function BackendAdminHome() {
                 setEnvironmentName={setEnvironmentName}
                 setHostName={setHostName}
                 setHostUrl={setHostUrl}
+                setLinuxAgentUrl={setLinuxAgentUrl}
                 setPrivateIp={setPrivateIp}
                 setPublicIp={setPublicIp}
                 setK8sCredentialContent={setK8sCredentialContent}
@@ -535,6 +582,8 @@ export default function BackendAdminHome() {
               />
             ) : activeNav === "中间件资源信息" ? (
               <MiddlewareResourceManager accessToken={session.access_token} />
+            ) : activeNav === "审计日志" ? (
+              <AuditLogView accessToken={session.access_token} />
             ) : (
               <RbacOverview
                 menus={menus}
@@ -551,13 +600,230 @@ export default function BackendAdminHome() {
   );
 }
 
+const auditPageSize = 20;
+
+function AuditLogView({ accessToken }: { accessToken: string }) {
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [actor, setActor] = useState("");
+  const [result, setResult] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const pageCount = Math.max(1, Math.ceil(total / auditPageSize));
+
+  const loadEvents = useCallback(
+    async (targetPage: number, targetActor: string, targetResult: string) => {
+      setLoading(true);
+      setError("");
+      try {
+        const query = new URLSearchParams({
+          page: String(targetPage),
+          page_size: String(auditPageSize),
+        });
+        if (targetActor.trim()) {
+          query.set("actor", targetActor.trim());
+        }
+        if (targetResult) {
+          query.set("result", targetResult);
+        }
+        const response = await fetch(`${apiBaseUrl}/api/rbac/audit-events?${query}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.detail ?? "加载审计日志失败");
+        }
+        const auditPage = data as AuditEventPage;
+        setEvents(auditPage.items);
+        setTotal(auditPage.total);
+        setPage(auditPage.page);
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : "加载审计日志失败");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [accessToken],
+  );
+
+  useEffect(() => {
+    void loadEvents(1, "", "");
+  }, [loadEvents]);
+
+  function handleFilter(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void loadEvents(1, actor, result);
+  }
+
+  return (
+    <section className="space-y-5">
+      <form
+        className="flex flex-wrap items-end gap-3 rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5"
+        onSubmit={handleFilter}
+      >
+        <label className="min-w-56 flex-1">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">操作用户</span>
+          <input
+            className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+            onChange={(event) => setActor(event.target.value)}
+            placeholder="输入用户名筛选"
+            value={actor}
+          />
+        </label>
+        <label className="min-w-48">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">执行结果</span>
+          <select
+            className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+            onChange={(event) => setResult(event.target.value)}
+            value={result}
+          >
+            <option value="">全部结果</option>
+            <option value="success">成功</option>
+            <option value="denied">拒绝</option>
+            <option value="error">异常</option>
+          </select>
+        </label>
+        <button
+          className="h-11 rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-bold text-white transition hover:bg-[#1628ff] disabled:opacity-60"
+          disabled={loading}
+          type="submit"
+        >
+          {loading ? "查询中..." : "查询"}
+        </button>
+      </form>
+
+      {error ? (
+        <div className="rounded-[6px] border border-[#ff385f]/45 bg-[#2a0712] px-4 py-3 text-sm text-[#ff8da4]">
+          {error}
+        </div>
+      ) : null}
+
+      <div className="overflow-hidden rounded-[8px] border border-white/10 bg-[#04050b]/52">
+        <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
+          <div>
+            <h2 className="text-lg font-black">安全审计记录</h2>
+            <p className="mt-1 text-xs text-[#bfc9e7]/55">共 {total} 条，记录身份、权限、路径和结果。</p>
+          </div>
+          <button
+            className="h-9 rounded-[6px] border border-[#4b5fc6] px-3 text-xs font-bold text-[#bfc9e7] hover:text-white disabled:opacity-60"
+            disabled={loading}
+            onClick={() => void loadEvents(page, actor, result)}
+            type="button"
+          >
+            刷新
+          </button>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1080px] text-left text-sm">
+            <thead className="text-xs text-[#bfc9e7]/55">
+              <tr className="border-b border-white/10">
+                <th className="px-5 py-3 font-semibold">时间</th>
+                <th className="px-4 py-3 font-semibold">用户 / 角色</th>
+                <th className="px-4 py-3 font-semibold">客户端</th>
+                <th className="px-4 py-3 font-semibold">权限</th>
+                <th className="px-4 py-3 font-semibold">请求</th>
+                <th className="px-4 py-3 font-semibold">结果</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((event) => (
+                <tr className="border-b border-white/10 last:border-0" key={event.id}>
+                  <td className="whitespace-nowrap px-5 py-4 text-[#bfc9e7]/72">
+                    {formatAuditTime(event.created_at)}
+                  </td>
+                  <td className="px-4 py-4">
+                    <p className="font-bold text-white">{event.actor_username || "匿名"}</p>
+                    <p className="mt-1 text-xs text-[#bfc9e7]/50">
+                      {event.role_codes?.join(", ") || "-"}
+                    </p>
+                  </td>
+                  <td className="px-4 py-4 text-[#bfc9e7]/72">{auditClientLabel(event.client_type)}</td>
+                  <td className="px-4 py-4 font-mono text-xs text-[#9bafff]">
+                    {event.permission_code || "-"}
+                  </td>
+                  <td className="max-w-[360px] px-4 py-4">
+                    <p className="font-mono text-xs text-[#bfc9e7]">
+                      {event.request_method} {event.request_path}
+                    </p>
+                    <p className="mt-1 text-xs text-[#bfc9e7]/45">HTTP {event.status_code}</p>
+                  </td>
+                  <td className="px-4 py-4">
+                    <span className={`inline-flex rounded-[5px] px-2.5 py-1 text-xs font-bold ${auditResultClass(event.result)}`}>
+                      {auditResultLabel(event.result)}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {!loading && events.length === 0 ? (
+          <p className="px-5 py-12 text-center text-sm text-[#bfc9e7]/50">暂无符合条件的审计记录</p>
+        ) : null}
+
+        <div className="flex items-center justify-end gap-3 border-t border-white/10 px-5 py-4">
+          <span className="text-xs text-[#bfc9e7]/55">第 {page} / {pageCount} 页</span>
+          <button
+            className="h-9 rounded-[6px] border border-[#1b255d] px-3 text-xs font-bold text-[#bfc9e7] disabled:opacity-35"
+            disabled={loading || page <= 1}
+            onClick={() => void loadEvents(page - 1, actor, result)}
+            type="button"
+          >
+            上一页
+          </button>
+          <button
+            className="h-9 rounded-[6px] border border-[#1b255d] px-3 text-xs font-bold text-[#bfc9e7] disabled:opacity-35"
+            disabled={loading || page >= pageCount}
+            onClick={() => void loadEvents(page + 1, actor, result)}
+            type="button"
+          >
+            下一页
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function formatAuditTime(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function auditClientLabel(clientType: string) {
+  if (clientType === "backend_admin_web") return "后台管理";
+  if (clientType === "user_web") return "用户控制台";
+  return clientType || "未知";
+}
+
+function auditResultLabel(result: AuditEvent["result"]) {
+  return result === "success" ? "成功" : result === "denied" ? "拒绝" : "异常";
+}
+
+function auditResultClass(result: AuditEvent["result"]) {
+  if (result === "success") return "bg-[#0e523b] text-[#74e3b8]";
+  if (result === "denied") return "bg-[#591425] text-[#ff8da4]";
+  return "bg-[#5a3a0b] text-[#ffd37a]";
+}
+
 const middlewareViews = ["中间件实例", "账号资产", "权限范围"] as const;
 
 function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
   const [activeView, setActiveView] = useState<(typeof middlewareViews)[number]>("中间件实例");
   const [instances, setInstances] = useState<MiddlewareInstance[]>([]);
+  const [middlewareType, setMiddlewareType] = useState<"nacos" | "doris" | "mysql">("nacos");
   const [environmentName, setEnvironmentName] = useState("");
+  const [instanceName, setInstanceName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
+  const [dorisHost, setDorisHost] = useState("");
+  const [dorisPort, setDorisPort] = useState("9030");
+  const [mysqlHost, setMysqlHost] = useState("");
+  const [mysqlPort, setMysqlPort] = useState("3306");
+  const [mysqlExporterUrl, setMysqlExporterUrl] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
@@ -565,25 +831,25 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
   const [notice, setNotice] = useState("");
 
   const loadInstances = useCallback(async () => {
-    const response = await fetch(`${apiBaseUrl}/api/middleware/instances?middleware_type=nacos`, {
+    const response = await fetch(`${apiBaseUrl}/api/middleware/instances`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     const data = await response.json().catch(() => []);
     if (!response.ok) {
-      throw new Error(data.detail ?? "加载 Nacos 实例失败");
+      throw new Error(data.detail ?? "加载中间件实例失败");
     }
     setInstances(data as MiddlewareInstance[]);
   }, [accessToken]);
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${apiBaseUrl}/api/middleware/instances?middleware_type=nacos`, {
+    fetch(`${apiBaseUrl}/api/middleware/instances`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     })
       .then(async (response) => {
         const data = await response.json().catch(() => []);
         if (!response.ok) {
-          throw new Error(data.detail ?? "加载 Nacos 实例失败");
+          throw new Error(data.detail ?? "加载中间件实例失败");
         }
         return data as MiddlewareInstance[];
       })
@@ -594,7 +860,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
       })
       .catch((loadError) => {
         if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : "加载 Nacos 实例失败");
+          setError(loadError instanceof Error ? loadError.message : "加载中间件实例失败");
         }
       });
     return () => {
@@ -615,31 +881,45 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          middleware_type: middlewareType,
           environment_name: environmentName,
-          base_url: baseUrl,
+          instance_name: instanceName,
+          base_url:
+            middlewareType === "nacos"
+              ? baseUrl
+              : middlewareType === "doris"
+                ? `${dorisHost}:${dorisPort}`
+                : `${mysqlHost}:${mysqlPort}`,
+          exporter_url: middlewareType === "mysql" ? mysqlExporterUrl : "",
           username,
           password,
         }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(data.detail ?? "添加 Nacos 实例失败");
+        throw new Error(data.detail ?? "添加中间件实例失败");
       }
       setEnvironmentName("");
+      setInstanceName("");
       setBaseUrl("");
+      setDorisHost("");
+      setDorisPort("9030");
+      setMysqlHost("");
+      setMysqlPort("3306");
+      setMysqlExporterUrl("");
       setUsername("");
       setPassword("");
       await loadInstances();
-      setNotice("Nacos 连接信息已加密保存。");
+      setNotice(`${middlewareTypeLabel(middlewareType)} 连接信息已加密保存。`);
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "添加 Nacos 实例失败");
+      setError(saveError instanceof Error ? saveError.message : "添加中间件实例失败");
     } finally {
       setSaving(false);
     }
   }
 
   async function handleDeleteInstance(instanceId: number) {
-    if (!window.confirm("确认删除这条 Nacos 连接信息吗？")) {
+    if (!window.confirm("确认删除这条中间件连接信息吗？")) {
       return;
     }
     setError("");
@@ -651,12 +931,12 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(data.detail ?? "删除 Nacos 实例失败");
+        throw new Error(data.detail ?? "删除中间件实例失败");
       }
       await loadInstances();
-      setNotice("Nacos 连接信息已删除。");
+      setNotice("中间件连接信息已删除。");
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "删除 Nacos 实例失败");
+      setError(deleteError instanceof Error ? deleteError.message : "删除中间件实例失败");
     }
   }
 
@@ -684,6 +964,27 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
           className="grid gap-4 rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur md:grid-cols-2 xl:grid-cols-4"
           onSubmit={handleCreateInstance}
         >
+          <div className="flex gap-2 md:col-span-2 xl:col-span-4" role="group" aria-label="中间件类型">
+            {(["nacos", "doris", "mysql"] as const).map((type) => (
+              <button
+                aria-pressed={middlewareType === type}
+                className={`h-10 min-w-28 rounded-[6px] border px-4 text-sm font-bold transition ${
+                  middlewareType === type
+                    ? "border-[#4b5fc6] bg-[#0a1ae1] text-white"
+                    : "border-[#1b255d] bg-[#070b1b] text-[#bfc9e7]/72 hover:border-[#4b5fc6] hover:text-white"
+                }`}
+                key={type}
+                onClick={() => {
+                  setMiddlewareType(type);
+                  setError("");
+                  setNotice("");
+                }}
+                type="button"
+              >
+                {middlewareTypeLabel(type)}
+              </button>
+            ))}
+          </div>
           <label className="block">
             <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">所属环境</span>
             <input
@@ -695,16 +996,89 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
             />
           </label>
           <label className="block">
-            <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">Nacos URL</span>
+            <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">实例名称</span>
             <input
               className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
-              onChange={(event) => setBaseUrl(event.target.value)}
-              placeholder="http://nacos.example.internal:8848/nacos"
+              onChange={(event) => setInstanceName(event.target.value)}
+              placeholder={`例如开发环境 ${middlewareTypeLabel(middlewareType)}`}
               required
-              type="url"
-              value={baseUrl}
+              value={instanceName}
             />
           </label>
+          {middlewareType === "nacos" ? (
+            <label className="block md:col-span-2">
+              <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">Nacos URL</span>
+              <input
+                className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+                onChange={(event) => setBaseUrl(event.target.value)}
+                placeholder="http://nacos.example.internal:8848/nacos"
+                required
+                type="url"
+                value={baseUrl}
+              />
+            </label>
+          ) : middlewareType === "doris" ? (
+            <>
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">Doris FE Host</span>
+                <input
+                  className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+                  onChange={(event) => setDorisHost(event.target.value)}
+                  placeholder="doris.example.internal"
+                  required
+                  value={dorisHost}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">查询端口</span>
+                <input
+                  className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+                  max={65535}
+                  min={1}
+                  onChange={(event) => setDorisPort(event.target.value)}
+                  required
+                  type="number"
+                  value={dorisPort}
+                />
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">MySQL Host</span>
+                <input
+                  className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+                  onChange={(event) => setMysqlHost(event.target.value)}
+                  placeholder="mysql.example.internal"
+                  required
+                  value={mysqlHost}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">连接端口</span>
+                <input
+                  className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+                  max={65535}
+                  min={1}
+                  onChange={(event) => setMysqlPort(event.target.value)}
+                  required
+                  type="number"
+                  value={mysqlPort}
+                />
+              </label>
+              <label className="block md:col-span-2 xl:col-span-4">
+                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">mysql-exporter URL</span>
+                <input
+                  className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+                  onChange={(event) => setMysqlExporterUrl(event.target.value)}
+                  placeholder="http://mysql-exporter.example.internal:9104/metrics"
+                  required
+                  type="url"
+                  value={mysqlExporterUrl}
+                />
+              </label>
+            </>
+          )}
           <label className="block">
             <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">用户名</span>
             <input
@@ -731,7 +1105,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
             disabled={saving}
             type="submit"
           >
-            {saving ? "加密保存中..." : "添加 Nacos"}
+            {saving ? "加密保存中..." : `添加 ${middlewareTypeLabel(middlewareType)}`}
           </button>
         </form>
       ) : null}
@@ -749,7 +1123,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
           <p className="mt-2 text-sm text-[#bfc9e7]/58">{middlewareViewDescription(activeView)}</p>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1080px] border-collapse text-sm">
+          <table className="w-full min-w-[1320px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-white/10 text-left text-[#bfc9e7]/60">
                 {middlewareViewColumns(activeView).map((column) => (
@@ -762,9 +1136,12 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
                 instances.map((instance) => (
                   <tr className="border-b border-white/8" key={instance.id}>
                     <td className="py-4 font-bold text-white">{instance.environment_name}</td>
-                    <td className="py-4 text-[#bfc9e7]/78">Nacos</td>
+                    <td className="py-4 text-[#bfc9e7]/78">{middlewareTypeLabel(instance.middleware_type)}</td>
                     <td className="py-4 text-[#bfc9e7]/78">{instance.instance_name}</td>
                     <td className="max-w-[320px] truncate py-4 text-[#bfc9e7]/64">{instance.base_url}</td>
+                    <td className="max-w-[320px] truncate py-4 text-[#bfc9e7]/64">
+                      {instance.exporter_url || "-"}
+                    </td>
                     <td className="py-4 text-[#bfc9e7]/78">{instance.username}</td>
                     <td className="py-4">
                       <span className="rounded-full bg-[#0a1ae1]/30 px-3 py-1 text-xs font-bold text-[#9fb0ff]">
@@ -810,7 +1187,7 @@ function middlewareViewColumns(view: (typeof middlewareViews)[number]): string[]
   if (view === "权限范围") {
     return ["环境", "中间件", "账号", "资源范围", "权限", "来源", "更新时间"];
   }
-  return ["环境", "类型", "实例名称", "连接地址", "用户名", "接入状态", "凭据", "添加时间", "操作"];
+  return ["环境", "类型", "实例名称", "连接地址", "Exporter 地址", "用户名", "接入状态", "凭据", "添加时间", "操作"];
 }
 
 function middlewareViewEmptyState(view: (typeof middlewareViews)[number]): string {
@@ -834,6 +1211,24 @@ function middlewareStatusLabel(status: MiddlewareInstance["status"]): string {
     return "已停用";
   }
   return "已配置";
+}
+
+function middlewareTypeLabel(type: MiddlewareInstance["middleware_type"]): string {
+  if (type === "doris") {
+    return "Doris";
+  }
+  if (type === "mysql") {
+    return "MySQL";
+  }
+  return "Nacos";
+}
+
+function backendAdminAuthHeaders(includeJson = false): Record<string, string> {
+  const session = readBackendAdminSession();
+  return {
+    ...(includeJson ? { "Content-Type": "application/json" } : {}),
+    ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}),
+  };
 }
 
 function readBackendAdminSession(): { access_token: string; client_type: string } | null {
@@ -951,6 +1346,7 @@ function RbacOverview({
 function MachineHostManager({
   hosts,
   hostUrl,
+  linuxAgentUrl,
   hostName,
   publicIp,
   privateIp,
@@ -958,11 +1354,14 @@ function MachineHostManager({
   namespaceKeysText,
   k8sCredentialContent,
   editingHostId,
+  editingHasK8sCredential,
+  editingK8sCredentialName,
   hostSaving,
   hostError,
   hostNotice,
   probingHostId,
   setHostUrl,
+  setLinuxAgentUrl,
   setHostName,
   setPublicIp,
   setPrivateIp,
@@ -977,6 +1376,7 @@ function MachineHostManager({
 }: {
   hosts: HostRecord[];
   hostUrl: string;
+  linuxAgentUrl: string;
   hostName: string;
   publicIp: string;
   privateIp: string;
@@ -984,11 +1384,14 @@ function MachineHostManager({
   namespaceKeysText: string;
   k8sCredentialContent: string;
   editingHostId: number | null;
+  editingHasK8sCredential: boolean;
+  editingK8sCredentialName: string;
   hostSaving: boolean;
   hostError: string;
   hostNotice: HostNotice | null;
   probingHostId: number | null;
   setHostUrl: (value: string) => void;
+  setLinuxAgentUrl: (value: string) => void;
   setHostName: (value: string) => void;
   setPublicIp: (value: string) => void;
   setPrivateIp: (value: string) => void;
@@ -1024,6 +1427,11 @@ function MachineHostManager({
           <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">私网 IP</span>
           <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setPrivateIp(event.target.value)} placeholder="手动填写" value={privateIp} />
         </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">主机用户管理地址</span>
+          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setLinuxAgentUrl(event.target.value)} placeholder="https://host:39110" value={linuxAgentUrl} />
+          <span className="mt-1 block text-xs text-[#bfc9e7]/52">可选。填写主机上的只读 Linux 账号 Agent 根地址。</span>
+        </label>
         <label className="block md:col-span-2 xl:col-span-3">
           <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">Namespace Key 白名单</span>
           <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 font-mono text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setNamespaceKeysText(event.target.value)} placeholder="例如 dev, prod（逗号、空格或换行分隔）" value={namespaceKeysText} />
@@ -1032,7 +1440,11 @@ function MachineHostManager({
         <label className="block md:col-span-2 xl:col-span-3">
           <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">K8S 凭证内容</span>
           <textarea className="min-h-52 w-full resize-y rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 py-3 font-mono text-xs leading-5 outline-none focus:border-[#7f91ff]" onChange={(event) => setK8sCredentialContent(event.target.value)} placeholder="可选：在这里粘贴完整 kubeconfig YAML 内容" value={k8sCredentialContent} />
-          {editingHostId ? <span className="mt-1 block text-xs text-[#bfc9e7]/52">留空会保留当前已加密保存的凭证；粘贴新内容会覆盖更新。</span> : null}
+          {editingHostId ? (
+            <span className="mt-1 block text-xs text-[#bfc9e7]/52">
+              当前凭证：{editingHasK8sCredential ? `${editingK8sCredentialName || "历史凭证（原文件名未记录）"}（已加密保存）` : "未配置"}。凭证正文不回显；留空会保留原凭证，粘贴新内容会覆盖更新。
+            </span>
+          ) : null}
         </label>
         <div className="flex gap-3 md:col-span-2 xl:col-span-3">
           <button className="h-11 flex-1 rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white transition hover:bg-[#1628ff] disabled:cursor-not-allowed disabled:opacity-60" disabled={hostSaving} type="submit">
@@ -1061,7 +1473,7 @@ function MachineHostManager({
       <article className="rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur">
         <h2 className="mb-4 text-lg font-black">已添加的主机信息</h2>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1380px] border-collapse text-sm">
+          <table className="w-full min-w-[1560px] border-collapse text-sm">
             <thead>
               <tr className="border-b border-white/10 text-left text-[#bfc9e7]/60">
                 <th className="py-3 font-semibold">主机名</th>
@@ -1073,6 +1485,7 @@ function MachineHostManager({
                 <th className="py-3 font-semibold">K8S 凭证</th>
                 <th className="py-3 font-semibold">Namespace Key</th>
                 <th className="py-3 font-semibold">node-exporter</th>
+                <th className="py-3 font-semibold">用户管理 Agent</th>
                 <th className="py-3 text-right font-semibold">操作</th>
               </tr>
             </thead>
@@ -1101,6 +1514,7 @@ function MachineHostManager({
                     {host.namespace_keys?.length ? host.namespace_keys.join(", ") : "未开放"}
                   </td>
                   <td className="max-w-[280px] truncate py-4 text-[#bfc9e7]/64">{host.node_exporter_url}</td>
+                  <td className="max-w-[280px] truncate py-4 text-[#bfc9e7]/64">{host.linux_agent_url || "未配置"}</td>
                   <td className="py-4 text-right">
                     <button
                       className="mr-4 text-sm font-bold text-[#7f91ff] disabled:cursor-not-allowed disabled:opacity-50"
