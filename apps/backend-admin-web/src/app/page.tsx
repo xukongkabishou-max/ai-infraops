@@ -69,7 +69,7 @@ type MiddlewareInstance = {
   middleware_type: "nacos" | "doris" | "mysql";
   instance_name: string;
   base_url: string;
-  exporter_url?: string | null;
+  dashboard_url?: string | null;
   username: string;
   status: "configured" | "active" | "unreachable" | "disabled";
   credential_configured: boolean | number;
@@ -823,9 +823,10 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
   const [dorisPort, setDorisPort] = useState("9030");
   const [mysqlHost, setMysqlHost] = useState("");
   const [mysqlPort, setMysqlPort] = useState("3306");
-  const [mysqlExporterUrl, setMysqlExporterUrl] = useState("");
+  const [mysqlDashboardUrl, setMysqlDashboardUrl] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [editingInstanceId, setEditingInstanceId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -868,14 +869,30 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
     };
   }, [accessToken]);
 
-  async function handleCreateInstance(event: FormEvent<HTMLFormElement>) {
+  function resetInstanceForm() {
+    setEditingInstanceId(null);
+    setEnvironmentName("");
+    setInstanceName("");
+    setBaseUrl("");
+    setDorisHost("");
+    setDorisPort("9030");
+    setMysqlHost("");
+    setMysqlPort("3306");
+    setMysqlDashboardUrl("");
+    setUsername("");
+    setPassword("");
+  }
+
+  async function handleSaveInstance(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaving(true);
     setError("");
     setNotice("");
     try {
-      const response = await fetch(`${apiBaseUrl}/api/middleware/instances`, {
-        method: "POST",
+      const response = await fetch(
+        `${apiBaseUrl}/api/middleware/instances${editingInstanceId ? `/${editingInstanceId}` : ""}`,
+        {
+        method: editingInstanceId ? "PUT" : "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
@@ -890,7 +907,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
               : middlewareType === "doris"
                 ? `${dorisHost}:${dorisPort}`
                 : `${mysqlHost}:${mysqlPort}`,
-          exporter_url: middlewareType === "mysql" ? mysqlExporterUrl : "",
+          dashboard_url: middlewareType === "mysql" ? mysqlDashboardUrl : "",
           username,
           password,
         }),
@@ -899,23 +916,47 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
       if (!response.ok) {
         throw new Error(data.detail ?? "添加中间件实例失败");
       }
-      setEnvironmentName("");
-      setInstanceName("");
-      setBaseUrl("");
-      setDorisHost("");
-      setDorisPort("9030");
-      setMysqlHost("");
-      setMysqlPort("3306");
-      setMysqlExporterUrl("");
-      setUsername("");
-      setPassword("");
+      const wasEditing = editingInstanceId !== null;
+      resetInstanceForm();
       await loadInstances();
-      setNotice(`${middlewareTypeLabel(middlewareType)} 连接信息已加密保存。`);
+      setNotice(
+        wasEditing
+          ? `${middlewareTypeLabel(middlewareType)} 实例信息已更新。`
+          : `${middlewareTypeLabel(middlewareType)} 连接信息已加密保存。`,
+      );
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "添加中间件实例失败");
     } finally {
       setSaving(false);
     }
+  }
+
+  function handleEditInstance(instance: MiddlewareInstance) {
+    setEditingInstanceId(instance.id);
+    setMiddlewareType(instance.middleware_type);
+    setEnvironmentName(instance.environment_name);
+    setInstanceName(instance.instance_name);
+    setBaseUrl(instance.middleware_type === "nacos" ? instance.base_url : "");
+    setDorisHost("");
+    setDorisPort("9030");
+    setMysqlHost("");
+    setMysqlPort("3306");
+    if (instance.middleware_type === "doris" || instance.middleware_type === "mysql") {
+      const address = parseMiddlewareDatabaseAddress(instance.base_url);
+      if (instance.middleware_type === "doris") {
+        setDorisHost(address.host);
+        setDorisPort(address.port);
+      } else {
+        setMysqlHost(address.host);
+        setMysqlPort(address.port);
+      }
+    }
+    setMysqlDashboardUrl(instance.dashboard_url ?? "");
+    setUsername(instance.username);
+    setPassword("");
+    setError("");
+    setNotice("正在编辑中间件实例；密码留空将保留原凭证。");
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function handleDeleteInstance(instanceId: number) {
@@ -962,7 +1003,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
       {activeView === "中间件实例" ? (
         <form
           className="grid gap-4 rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur md:grid-cols-2 xl:grid-cols-4"
-          onSubmit={handleCreateInstance}
+          onSubmit={handleSaveInstance}
         >
           <div className="flex gap-2 md:col-span-2 xl:col-span-4" role="group" aria-label="中间件类型">
             {(["nacos", "doris", "mysql"] as const).map((type) => (
@@ -1067,14 +1108,14 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
                 />
               </label>
               <label className="block md:col-span-2 xl:col-span-4">
-                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">mysql-exporter URL</span>
+                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">Grafana 仪表盘地址</span>
                 <input
                   className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
-                  onChange={(event) => setMysqlExporterUrl(event.target.value)}
-                  placeholder="http://mysql-exporter.example.internal:9104/metrics"
+                  onChange={(event) => setMysqlDashboardUrl(event.target.value)}
+                  placeholder="https://grafana.example.internal/d/mysql-overview"
                   required
                   type="url"
-                  value={mysqlExporterUrl}
+                  value={mysqlDashboardUrl}
                 />
               </label>
             </>
@@ -1090,23 +1131,44 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
             />
           </label>
           <label className="block">
-            <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">密码</span>
+            <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">
+              密码{editingInstanceId ? "（留空保留原密码）" : ""}
+            </span>
             <input
               autoComplete="new-password"
               className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
               onChange={(event) => setPassword(event.target.value)}
-              required
+              required={!editingInstanceId}
               type="password"
               value={password}
             />
           </label>
-          <button
-            className="h-11 rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white transition hover:bg-[#1628ff] disabled:cursor-not-allowed disabled:opacity-60 md:col-span-2 xl:col-span-4"
-            disabled={saving}
-            type="submit"
-          >
-            {saving ? "加密保存中..." : `添加 ${middlewareTypeLabel(middlewareType)}`}
-          </button>
+          <div className="flex gap-3 md:col-span-2 xl:col-span-4">
+            <button
+              className="h-11 flex-1 rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white transition hover:bg-[#1628ff] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={saving}
+              type="submit"
+            >
+              {saving
+                ? "加密保存中..."
+                : editingInstanceId
+                  ? `保存 ${middlewareTypeLabel(middlewareType)} 修改`
+                  : `添加 ${middlewareTypeLabel(middlewareType)}`}
+            </button>
+            {editingInstanceId ? (
+              <button
+                className="h-11 rounded-[6px] border border-[#29356f] px-5 text-sm font-bold text-[#bfc9e7] hover:border-[#4b5fc6] hover:text-white"
+                onClick={() => {
+                  resetInstanceForm();
+                  setError("");
+                  setNotice("");
+                }}
+                type="button"
+              >
+                取消编辑
+              </button>
+            ) : null}
+          </div>
         </form>
       ) : null}
 
@@ -1140,7 +1202,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
                     <td className="py-4 text-[#bfc9e7]/78">{instance.instance_name}</td>
                     <td className="max-w-[320px] truncate py-4 text-[#bfc9e7]/64">{instance.base_url}</td>
                     <td className="max-w-[320px] truncate py-4 text-[#bfc9e7]/64">
-                      {instance.exporter_url || "-"}
+                      {instance.dashboard_url || "-"}
                     </td>
                     <td className="py-4 text-[#bfc9e7]/78">{instance.username}</td>
                     <td className="py-4">
@@ -1151,7 +1213,10 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
                     <td className="py-4 text-[#bfc9e7]/78">{instance.credential_configured ? "已加密" : "未配置"}</td>
                     <td className="py-4 text-[#bfc9e7]/64">{formatHostTime(instance.created_at)}</td>
                     <td className="py-4 text-right">
-                      <button className="text-sm font-bold text-[#ff7f8a]" onClick={() => handleDeleteInstance(instance.id)} type="button">删除</button>
+                      <div className="flex justify-end gap-4">
+                        <button className="text-sm font-bold text-[#9fb0ff]" onClick={() => handleEditInstance(instance)} type="button">编辑</button>
+                        <button className="text-sm font-bold text-[#ff7f8a]" onClick={() => handleDeleteInstance(instance.id)} type="button">删除</button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -1187,7 +1252,19 @@ function middlewareViewColumns(view: (typeof middlewareViews)[number]): string[]
   if (view === "权限范围") {
     return ["环境", "中间件", "账号", "资源范围", "权限", "来源", "更新时间"];
   }
-  return ["环境", "类型", "实例名称", "连接地址", "Exporter 地址", "用户名", "接入状态", "凭据", "添加时间", "操作"];
+  return ["环境", "类型", "实例名称", "连接地址", "仪表盘地址", "用户名", "接入状态", "凭据", "添加时间", "操作"];
+}
+
+function parseMiddlewareDatabaseAddress(baseUrl: string): { host: string; port: string } {
+  try {
+    const parsed = new URL(baseUrl);
+    return { host: parsed.hostname, port: parsed.port };
+  } catch {
+    const separator = baseUrl.lastIndexOf(":");
+    return separator > -1
+      ? { host: baseUrl.slice(0, separator), port: baseUrl.slice(separator + 1) }
+      : { host: baseUrl, port: "" };
+  }
 }
 
 function middlewareViewEmptyState(view: (typeof middlewareViews)[number]): string {

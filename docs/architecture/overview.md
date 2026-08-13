@@ -57,14 +57,15 @@ AI InfraOps 采用 monorepo 结构，前端、后端服务、共享包、基础�
 
 ## 中间件凭证边界
 
-- `middleware_instances.environment_id` 复用环境主数据，当前接入类型为 Nacos、Doris 和 MySQL；MySQL 实例额外保存 mysql-exporter 地址，为后续指标查询提供数据来源。
+- `middleware_instances.environment_id` 复用环境主数据，当前接入类型为 Nacos、Doris 和 MySQL；MySQL 实例额外保存 Grafana 仪表盘地址，旧 mysql-exporter 字段仅保留历史兼容。
 - 中间件密码使用 AES-256-GCM 加密后保存，管理列表接口只选择环境、类型、名称、URL、用户名和状态等公开字段。
 - 密码明文只存在于管理端提交和后端请求处理期间，不写日志、不回显、不进入 Git。
-- 中间件实例接口要求后台管理会话，并按列表、新增、删除操作检查 `middleware:*` 权限。
+- 中间件实例接口要求后台管理会话，并按列表、新增、修改、删除操作检查 `middleware:*` 权限。修改时密码留空表示保留已有密文。
 - `configured` 表示已登记，不等于连通；配置目录查询由 Nacos adapter 更新 `active` 或 `unreachable`。
 - 普通用户端只能通过 `user_web` 会话和 `nacos:catalog:list` 权限访问 Nacos 目录接口。环境列表不返回 URL 和用户名，目录响应使用字段白名单，仅保留 Namespace、Group、DataId 和格式。
 - Doris 用户端接口使用 `doris:accounts:list` 权限，通过 FE MySQL 协议执行 `SHOW ALL GRANTS`；只返回账号标识、Host、备注等安全字段，不返回登记连接、密码、密码哈希或 Doris 的 `Password` 列。
 - MySQL 用户端接口使用 `mysql:accounts:list` 权限，只查询 `mysql.user` 中的账号标识、Host、认证插件和状态字段，不查询或返回认证哈希。Doris/MySQL 的当前密码托管、显示、校验和同步仅限超级管理员，并分别使用独立密文域和审计表。
+- MySQL 仪表盘使用独立的 `mysql:dashboard:view` 权限。RD 可以读取环境、实例名称和仪表盘 URL，但该接口不返回 MySQL 连接地址、管理用户名或凭证；iframe 是否可用仍受 Grafana 的嵌入策略和登录权限控制。
 
 ## 日志与诊断边界
 

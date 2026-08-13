@@ -194,6 +194,16 @@ type NacosConfigStructure = {
   structure: string;
 };
 
+type MysqlDashboardOption = {
+  id: number;
+  environment_id: number;
+  environment_name: string;
+  instance_name: string;
+  dashboard_url?: string | null;
+  status: "configured" | "active" | "unreachable" | "disabled";
+  last_seen_at?: string | null;
+};
+
 type DatabaseInstanceOption = {
   id: number;
   environment_id: number;
@@ -2407,6 +2417,9 @@ function MiddlewareSystemView({
   const [nacosStructureLoading, setNacosStructureLoading] = useState(false);
   const [nacosStructureError, setNacosStructureError] = useState("");
   const [expandedNacosConfigKey, setExpandedNacosConfigKey] = useState("");
+  const [mysqlDashboards, setMysqlDashboards] = useState<MysqlDashboardOption[]>([]);
+  const [mysqlDashboardsLoading, setMysqlDashboardsLoading] = useState(false);
+  const [mysqlDashboardError, setMysqlDashboardError] = useState("");
   const nacosStructureRequestId = useRef(0);
   const nacosTableScrollRef = useRef<HTMLDivElement>(null);
 
@@ -2438,6 +2451,31 @@ function MiddlewareSystemView({
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (activePage !== "healthChecks") {
+      return;
+    }
+    const controller = new AbortController();
+    setMysqlDashboardsLoading(true);
+    setMysqlDashboardError("");
+    fetchUserApi<MysqlDashboardOption[]>("/api/mysql/dashboards", controller.signal)
+      .then(setMysqlDashboards)
+      .catch((loadError) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") {
+          return;
+        }
+        setMysqlDashboardError(
+          loadError instanceof Error ? loadError.message : "MySQL 仪表盘加载失败",
+        );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setMysqlDashboardsLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [activePage]);
 
   async function handleLoadNacosCatalog() {
     if (!selectedNacosId) {
@@ -2517,6 +2555,7 @@ function MiddlewareSystemView({
   const selectedNamespace = nacosCatalog?.namespaces.find(
     (namespace) => namespace.namespace_id === selectedNamespaceId,
   ) ?? nacosCatalog?.namespaces[0];
+  const configuredMysqlDashboards = mysqlDashboards.filter((item) => item.dashboard_url);
 
   return (
     <div className="space-y-5">
@@ -2721,7 +2760,7 @@ function MiddlewareSystemView({
       ) : null}
 
       {activePage === "healthChecks" ? (
-        <SectionBlock title="核心数据库可用性快速校验" description="当前只是 mock 静态页面。后续前端点击测试 Kafka/MySQL/Doris/Redis，后端收到请求后执行对应模拟脚本。">
+        <SectionBlock title="核心数据库可用性快速校验" description="可用性脚本仍为预留功能；MySQL 支持跳转后台登记的 Grafana 仪表盘。">
         <div className="grid gap-4 lg:grid-cols-2">
           {healthCheckRows.map((row) => (
             <div className="rounded-[6px] border border-white/10 bg-[#070b1b] p-5" key={row.middleware}>
@@ -2730,9 +2769,29 @@ function MiddlewareSystemView({
                 <span className="rounded-full bg-[#0a1ae1]/24 px-3 py-1 text-xs font-bold text-[#9fb0ff]">{row.status}</span>
               </div>
               <p className="mt-4 text-sm leading-6 text-[#bfc9e7]/70">{row.check}</p>
-              <button className="mt-5 h-10 rounded-[6px] border border-[#4b5fc6] px-4 text-sm font-bold text-[#bfc9e7] opacity-60" disabled type="button">
-                测试 {row.middleware} 是否正常
-              </button>
+              <div className="mt-5 flex flex-wrap gap-3">
+                <button className="h-10 rounded-[6px] border border-[#4b5fc6] px-4 text-sm font-bold text-[#bfc9e7] opacity-60" disabled type="button">
+                  测试 {row.middleware} 是否正常
+                </button>
+                {row.middleware === "MySQL" ? (
+                  configuredMysqlDashboards.map((dashboard) => (
+                    <a
+                      className="inline-flex min-h-10 items-center rounded-[6px] bg-[#0a1ae1] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#2636ff]"
+                      href={dashboard.dashboard_url ?? undefined}
+                      key={dashboard.id}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      查看仪表盘：{dashboard.environment_name} / {dashboard.instance_name}
+                    </a>
+                  ))
+                ) : null}
+              </div>
+              {row.middleware === "MySQL" && mysqlDashboardsLoading ? <p className="mt-3 text-xs text-[#bfc9e7]/58">正在加载 MySQL 仪表盘配置...</p> : null}
+              {row.middleware === "MySQL" && mysqlDashboardError ? <p className="mt-3 text-xs text-[#ff9aa3]">{mysqlDashboardError}</p> : null}
+              {row.middleware === "MySQL" && !mysqlDashboardsLoading && !mysqlDashboardError && configuredMysqlDashboards.length === 0 ? (
+                <p className="mt-3 text-xs text-[#ffd37a]">暂无已配置的 Grafana 仪表盘地址。</p>
+              ) : null}
             </div>
           ))}
         </div>

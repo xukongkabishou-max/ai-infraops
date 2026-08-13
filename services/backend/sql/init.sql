@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS `middleware_instances` (
   `instance_name` VARCHAR(128) NOT NULL,
   `base_url` VARCHAR(512) NOT NULL,
   `exporter_url` VARCHAR(512) NULL,
+  `dashboard_url` VARCHAR(2048) NULL,
   `username` VARCHAR(255) NOT NULL,
   `password_ciphertext` VARBINARY(4096) NOT NULL,
   `password_nonce` VARBINARY(12) NOT NULL,
@@ -267,10 +268,12 @@ VALUES
   ('k8s:env:list', '查看 K8S 环境变量 Key', 'api', '查看白名单 namespace 下容器运行时环境变量名称', 1),
   ('middleware:list', '查看中间件实例', 'api', '查看已登记的中间件实例', 1),
   ('middleware:create', '添加中间件实例', 'api', '登记中间件连接信息', 1),
+  ('middleware:update', '修改中间件实例', 'api', '修改中间件连接信息和仪表盘地址', 1),
   ('middleware:delete', '删除中间件实例', 'api', '删除中间件连接信息', 1),
   ('nacos:catalog:list', '查看 Nacos 配置目录', 'api', '查看 Nacos 命名空间、Group、DataId 和配置格式', 1),
   ('doris:accounts:list', '查看 Doris 账号', 'api', '查看 Doris 用户标识、角色和授权范围', 1),
-  ('mysql:accounts:list', '查看 MySQL 账号', 'api', '查看 MySQL 用户标识和账号状态', 1)
+  ('mysql:accounts:list', '查看 MySQL 账号', 'api', '查看 MySQL 用户标识和账号状态', 1),
+  ('mysql:dashboard:view', '查看 MySQL 仪表盘', 'api', '查看已配置的 MySQL Grafana 仪表盘', 1)
 ON DUPLICATE KEY UPDATE `name` = VALUES(`name`), `is_active` = 1;
 
 INSERT INTO `rbac_users` (`username`, `password_hash`, `display_name`, `email`, `is_active`, `is_superuser`)

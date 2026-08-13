@@ -173,7 +173,7 @@ PUT  /api/doris/instances/{instance_id}/accounts/password/current
 
 查询接口显式选择公开字段，不会返回 `password_ciphertext` 或 `password_nonce`。日志同样不记录请求体、用户名、密码和连接 URL。建议为 `MIDDLEWARE_CREDENTIAL_ENCRYPTION_KEY` 配置独立的 Base64 32 字节密钥；迁移期间未配置时，后端会从现有 K8S 密钥派生用途隔离的密钥。
 
-中间件实例接口要求 `Authorization: Bearer <backend_admin_web access_token>`，并校验对应的 `middleware:*` 权限。`middleware_type=mysql` 时还必须提交完整的 HTTP/HTTPS `exporter_url`；该地址单独保存，用于后续采集 mysql-exporter 指标。
+中间件实例接口要求 `Authorization: Bearer <backend_admin_web access_token>`，并校验对应的 `middleware:*` 权限。`middleware_type=mysql` 时还必须提交完整的 HTTP/HTTPS `dashboard_url`；更新接口允许密码留空，此时保留已有加密凭证。
 
 当前 `status=configured` 仅表示连接信息已保存，不代表 Nacos 已完成连通性验证。普通用户端使用 `user_web` Bearer 会话调用 `/api/nacos/instances` 获取环境选项，再调用 `/api/nacos/instances/{instance_id}/catalog` 实时查询目录；两个接口要求 `nacos:catalog:list` 权限。
 
@@ -189,9 +189,9 @@ Doris 复用 `middleware_instances` 和中间件凭证加密机制，`middleware
 
 ## MySQL 实例与账号
 
-MySQL 复用 `middleware_instances` 和中间件凭证加密机制，`middleware_type=mysql`，`base_url` 规范化为 `mysql://host:port`。`012_mysql_instances.sql` 为实例表增加可空的 `exporter_url`；MySQL 请求必须填写该字段，Nacos 和 Doris 请求会忽略它。列表接口可以返回 Exporter 地址，但不会返回管理密码、密文或 nonce。
+MySQL 复用 `middleware_instances` 和中间件凭证加密机制，`middleware_type=mysql`，`base_url` 规范化为 `mysql://host:port`。`016_mysql_dashboard.sql` 为实例表增加可空的 `dashboard_url`；MySQL 请求必须填写该字段，Nacos 和 Doris 请求会忽略它。后台列表可以返回仪表盘地址，但不会返回管理密码、密文或 nonce。
 
-用户端通过 `/api/mysql/instances` 和 `/api/mysql/instances/{instance_id}/accounts` 按环境、实例查询账号。适配器只查询 `mysql.user` 的 User、Host、认证插件、锁定和密码过期状态，不查询 `authentication_string`。密码校验、同步以及当前密码托管接口与 Doris 一致，仅限超级管理员；目标账号登录加 `CURRENT_USER()` 用于校验，登记管理账号通过 `ALTER USER` 同步密码。`013_mysql_accounts.sql` 创建独立密码密文与审计表。mysql-exporter 仅保留给后续指标接口。
+用户端通过 `/api/mysql/instances` 和 `/api/mysql/instances/{instance_id}/accounts` 按环境、实例查询账号。适配器只查询 `mysql.user` 的 User、Host、认证插件、锁定和密码过期状态，不查询 `authentication_string`。密码校验、同步以及当前密码托管接口与 Doris 一致，仅限超级管理员；目标账号登录加 `CURRENT_USER()` 用于校验，登记管理账号通过 `ALTER USER` 同步密码。`013_mysql_accounts.sql` 创建独立密码密文与审计表。`/api/mysql/dashboards` 只返回环境、实例、状态与 Grafana URL，使用独立权限且不返回数据库连接元数据。
 
 冒烟检查会读取首个已登记 Nacos，只输出安全计数：
 

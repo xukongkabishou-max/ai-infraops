@@ -146,6 +146,7 @@ KubeKey kubeconfig 将 API Server 域名替换为外部可达 IP 后，如果证
 ```text
 GET    /api/middleware/instances              查看已登记的中间件实例
 POST   /api/middleware/instances              添加 Nacos、Doris 或 MySQL 连接信息
+PUT    /api/middleware/instances/{instance_id} 修改连接信息；密码留空时保留原凭证
 DELETE /api/middleware/instances/{instance_id} 删除连接信息
 GET    /api/nacos/instances                   用户端获取已登记的 Nacos 环境
 GET    /api/nacos/instances/{instance_id}/catalog 实时读取 Namespace、Group、DataId 和格式
@@ -166,9 +167,9 @@ GET /api/doris/instances/{instance_id}/accounts
 
 ## MySQL 实例与账号
 
-后台中间件实例表单支持登记所属环境、实例名称、MySQL Host、连接端口、管理用户名、管理密码和 `mysql-exporter URL`。管理密码使用现有 AES-256-GCM 机制加密保存，Exporter 地址作为后续指标展示的非敏感元数据单独保存。
+后台中间件实例表单支持登记所属环境、实例名称、MySQL Host、连接端口、管理用户名、管理密码和 Grafana 仪表盘地址。已登记实例可进入编辑模式并回填原属性；密码不会回显，编辑时留空即保留原加密凭证。
 
-普通用户端的“中间件账号获取”可以切换 Doris/MySQL，按所属环境和实例实时查询 MySQL 用户标识、Host、认证插件和账号状态。超级管理员还可加密登记当前密码、显示/复制、通过目标账号登录校验，并通过登记管理账号执行 `ALTER USER` 同步密码。账号列表不会读取或返回 MySQL 密码哈希；详细边界见 `docs/vibecoding/mysql-instance-management.md`。
+普通用户端的“中间件账号获取”可以切换 Doris/MySQL，按所属环境和实例实时查询 MySQL 用户标识、Host、认证插件和账号状态。超级管理员还可加密登记当前密码、显示/复制、通过目标账号登录校验，并通过登记管理账号执行 `ALTER USER` 同步密码。中间件系统页面会列出已登记的 Grafana 仪表盘超链接，点击后在新窗口打开；该只读接口不返回 MySQL 连接地址、管理用户名或凭证。详细边界见 `docs/vibecoding/mysql-instance-management.md`。
 
 ## 普通用户控制台功能骨架
 

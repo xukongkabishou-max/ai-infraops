@@ -70,6 +70,7 @@ from .schemas import (
     LoginRequest,
     LoginResponse,
     MiddlewareInstanceCreateRequest,
+    MiddlewareInstanceUpdateRequest,
     NacosConfigStructureRequest,
     SessionRequest,
 )
@@ -479,7 +480,7 @@ def list_middleware_instances(
         f"""
         SELECT m.id, m.environment_id, e.code AS environment_code,
                e.name AS environment_name, m.middleware_type, m.instance_name,
-               m.base_url, m.exporter_url, m.username, m.status,
+               m.base_url, m.dashboard_url, m.username, m.status,
                m.last_error, m.last_seen_at,
                m.created_at, m.updated_at,
                (m.password_ciphertext IS NOT NULL AND m.password_nonce IS NOT NULL)
@@ -550,7 +551,7 @@ def create_middleware_instance(
                 """
                 INSERT INTO middleware_instances (
                     environment_id, middleware_type, instance_name, base_url,
-                    exporter_url, username, password_ciphertext, password_nonce,
+                    dashboard_url, username, password_ciphertext, password_nonce,
                     status, last_error
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'configured', NULL)
@@ -560,7 +561,7 @@ def create_middleware_instance(
                     payload.middleware_type,
                     instance_name,
                     payload.base_url,
-                    payload.exporter_url or None,
+                    payload.dashboard_url or None,
                     payload.username,
                     password_ciphertext,
                     password_nonce,
@@ -593,13 +594,124 @@ def create_middleware_instance(
         "middleware_type": payload.middleware_type,
         "instance_name": instance_name,
         "base_url": payload.base_url,
-        "exporter_url": payload.exporter_url or None,
+        "dashboard_url": payload.dashboard_url or None,
         "username": payload.username,
         "status": "configured",
         "last_error": None,
         "last_seen_at": None,
         "created_at": created_at,
         "updated_at": created_at,
+        "credential_configured": True,
+    }
+
+
+@app.put("/api/middleware/instances/{instance_id}")
+def update_middleware_instance(
+    instance_id: int,
+    payload: MiddlewareInstanceUpdateRequest,
+    admin_session: dict = Depends(require_backend_admin_session),
+) -> dict:
+    require_permission(admin_session, "middleware:update")
+    middleware_label = {
+        "nacos": "Nacos",
+        "doris": "Doris",
+        "mysql": "MySQL",
+    }[payload.middleware_type]
+    instance_name = payload.instance_name or f"{payload.environment_name} {middleware_label}"
+    environment_code = (
+        f"env-{hashlib.sha256(payload.environment_name.encode('utf-8')).hexdigest()[:16]}"
+    )
+    password_fields = ""
+    password_params: tuple = ()
+    if payload.password:
+        try:
+            password_ciphertext, password_nonce = encrypt_middleware_password(
+                payload.password
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        password_fields = ", password_ciphertext = %s, password_nonce = %s"
+        password_params = (password_ciphertext, password_nonce)
+
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM middleware_instances WHERE id = %s LIMIT 1",
+                (instance_id,),
+            )
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="中间件实例不存在")
+            cursor.execute(
+                "SELECT id, code, is_active FROM infra_environments WHERE name = %s LIMIT 1",
+                (payload.environment_name,),
+            )
+            environment = cursor.fetchone()
+            if environment:
+                environment_id = environment["id"]
+                environment_code = environment["code"]
+                if not environment["is_active"]:
+                    cursor.execute(
+                        "UPDATE infra_environments SET is_active = 1 WHERE id = %s",
+                        (environment_id,),
+                    )
+            else:
+                cursor.execute(
+                    "INSERT INTO infra_environments (code, name, is_active) VALUES (%s, %s, 1)",
+                    (environment_code, payload.environment_name),
+                )
+                environment_id = cursor.lastrowid
+            cursor.execute(
+                f"""
+                UPDATE middleware_instances
+                SET environment_id = %s, middleware_type = %s, instance_name = %s,
+                    base_url = %s, dashboard_url = %s, username = %s,
+                    status = 'configured', last_error = NULL{password_fields}
+                WHERE id = %s
+                """,
+                (
+                    environment_id,
+                    payload.middleware_type,
+                    instance_name,
+                    payload.base_url,
+                    payload.dashboard_url or None,
+                    payload.username,
+                    *password_params,
+                    instance_id,
+                ),
+            )
+        connection.commit()
+    except HTTPException:
+        connection.rollback()
+        raise
+    except IntegrityError as exc:
+        connection.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"该 {middleware_label} 连接地址已登记",
+        ) from exc
+    finally:
+        connection.close()
+
+    logger.info(
+        "中间件实例已更新",
+        extra={
+            "event": "middleware_instance_updated",
+            "middleware_instance_id": instance_id,
+            "middleware_type": payload.middleware_type,
+        },
+    )
+    return {
+        "id": instance_id,
+        "environment_id": environment_id,
+        "environment_code": environment_code,
+        "environment_name": payload.environment_name,
+        "middleware_type": payload.middleware_type,
+        "instance_name": instance_name,
+        "base_url": payload.base_url,
+        "dashboard_url": payload.dashboard_url or None,
+        "username": payload.username,
+        "status": "configured",
         "credential_configured": True,
     }
 
@@ -1263,6 +1375,25 @@ def list_user_mysql_instances(
         """
         SELECT m.id, m.environment_id, e.name AS environment_name,
                m.instance_name, m.status, m.last_seen_at
+        FROM middleware_instances m
+        JOIN infra_environments e ON e.id = m.environment_id
+        WHERE m.middleware_type = 'mysql'
+          AND m.status <> 'disabled'
+          AND e.is_active = 1
+        ORDER BY e.name, m.instance_name, m.id
+        """
+    )
+
+
+@app.get("/api/mysql/dashboards")
+def list_user_mysql_dashboards(
+    user_session: dict = Depends(require_user_web_session),
+) -> list[dict]:
+    require_permission(user_session, "mysql:dashboard:view")
+    return execute_query(
+        """
+        SELECT m.id, m.environment_id, e.name AS environment_name,
+               m.instance_name, m.dashboard_url, m.status, m.last_seen_at
         FROM middleware_instances m
         JOIN infra_environments e ON e.id = m.environment_id
         WHERE m.middleware_type = 'mysql'

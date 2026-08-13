@@ -15,6 +15,6 @@
 - `k8s-env-key-inventory.md`：Namespace 白名单和 Pod 运行时环境变量 Key 查询记录。
 - `nacos-connection-management.md`：Nacos 凭证登记与配置目录元数据查询记录。
 - `doris-account-inventory.md`：Doris 实例登记、账号标识和授权范围查询记录。
-- `mysql-instance-management.md`：MySQL 实例登记、账号查询、密码托管与 mysql-exporter 边界记录。
+- `mysql-instance-management.md`：MySQL 实例登记与编辑、账号查询、密码托管及 Grafana 仪表盘边界记录。
 - `linux-account-agent.md`：Linux 只读账号 Agent、后端代理查询与后续受限写操作边界。
 - `rbac-permission-audit.md`：运维与研发角色边界、双端鉴权和通用安全审计记录。
