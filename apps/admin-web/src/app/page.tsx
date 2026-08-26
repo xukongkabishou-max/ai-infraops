@@ -331,16 +331,38 @@ const monitoringCards = [
   { title: "SLO 守护", detail: "预留核心业务 SLO、错误预算和服务可用性趋势展示。" },
 ];
 
-const apiBaseUrl =
-  process.env.NEXT_PUBLIC_ADMIN_API_BASE_URL ??
-  process.env.NEXT_PUBLIC_RBAC_API_BASE_URL ??
-  "http://localhost:8000";
+function resolveApiBaseUrl() {
+  const configuredUrl =
+    process.env.NEXT_PUBLIC_ADMIN_API_BASE_URL ??
+    process.env.NEXT_PUBLIC_RBAC_API_BASE_URL;
+
+  if (typeof window === "undefined") {
+    return configuredUrl || "";
+  }
+
+  if (!configuredUrl) {
+    return "";
+  }
+
+  try {
+    const parsedUrl = new URL(configuredUrl);
+    if (["localhost", "127.0.0.1"].includes(parsedUrl.hostname)) {
+      return "";
+    }
+  } catch {
+    return configuredUrl;
+  }
+
+  return configuredUrl;
+}
+
+const apiBaseUrl = resolveApiBaseUrl();
 const userSessionStorageKey = "ai-infraops:user-web-session";
 const userWebClientType = "user_web";
 
 export default function Home() {
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeSection, setActiveSection] = useState<SectionKey>("machine");
@@ -369,6 +391,7 @@ export default function Home() {
 
   useEffect(() => {
     let alive = true;
+    window.localStorage.removeItem(userSessionStorageKey);
     const savedSession = readUserWebSession();
     if (!savedSession) {
       return;
@@ -392,7 +415,7 @@ export default function Home() {
         }
       })
       .catch(() => {
-        window.localStorage.removeItem(userSessionStorageKey);
+        window.sessionStorage.removeItem(userSessionStorageKey);
         if (alive) {
           setAuthenticated(false);
           setIsSuperuser(false);
@@ -422,7 +445,7 @@ export default function Home() {
         throw new Error(data.detail ?? "登录失败，请检查账号或密码");
       }
       const loginSession = data as UserWebAuthResponse;
-      window.localStorage.setItem(
+      window.sessionStorage.setItem(
         userSessionStorageKey,
         JSON.stringify({
           access_token: loginSession.access_token,
@@ -431,9 +454,11 @@ export default function Home() {
       );
       setAuthenticated(true);
       applyAuthorization(loginSession);
+      setUsername("");
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "登录失败");
     } finally {
+      setPassword("");
       setLoading(false);
     }
   }
@@ -447,7 +472,9 @@ export default function Home() {
         body: JSON.stringify(savedSession),
       }).catch(() => undefined);
     }
-    window.localStorage.removeItem(userSessionStorageKey);
+    window.sessionStorage.removeItem(userSessionStorageKey);
+    setUsername("");
+    setPassword("");
     setAuthenticated(false);
     setIsSuperuser(false);
     setPermissions([]);
@@ -582,6 +609,8 @@ export default function Home() {
                 <span className="mb-2 block text-xs font-semibold text-[#bfc9e7]/60">工作账号</span>
                 <input
                   className="h-14 w-full rounded-[4px] border border-[#1b255d] bg-[#070b1b] px-4 text-base text-white outline-none transition focus:border-[#4b5fc6] focus:shadow-[0_0_0_4px_rgba(75,95,198,0.18)]"
+                  autoComplete="username"
+                  name="username"
                   onChange={(event) => setUsername(event.target.value)}
                   placeholder="请输入工作账号"
                   type="text"
@@ -593,6 +622,8 @@ export default function Home() {
                 <span className="mb-2 block text-xs font-semibold text-[#bfc9e7]/60">登录密码</span>
                 <input
                   className="h-14 w-full rounded-[4px] border border-[#1b255d] bg-[#070b1b] px-4 text-base text-white outline-none transition focus:border-[#4b5fc6] focus:shadow-[0_0_0_4px_rgba(75,95,198,0.18)]"
+                  autoComplete="current-password"
+                  name="password"
                   onChange={(event) => setPassword(event.target.value)}
                   placeholder="请输入安全密码"
                   type="password"
@@ -2919,7 +2950,7 @@ function CompactTable({ columns, rows }: { columns: string[]; rows: string[][] }
 
 function readUserWebSession(): UserWebSession | null {
   try {
-    const rawSession = window.localStorage.getItem(userSessionStorageKey);
+    const rawSession = window.sessionStorage.getItem(userSessionStorageKey);
     if (!rawSession) {
       return null;
     }

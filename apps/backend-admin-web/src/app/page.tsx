@@ -101,8 +101,30 @@ type AuditEventPage = {
   page_size: number;
 };
 
-const apiBaseUrl =
-  process.env.NEXT_PUBLIC_RBAC_API_BASE_URL ?? "http://localhost:8000";
+function resolveApiBaseUrl() {
+  const configuredUrl = process.env.NEXT_PUBLIC_RBAC_API_BASE_URL;
+
+  if (typeof window === "undefined") {
+    return configuredUrl || "";
+  }
+
+  if (!configuredUrl) {
+    return "";
+  }
+
+  try {
+    const parsedUrl = new URL(configuredUrl);
+    if (["localhost", "127.0.0.1"].includes(parsedUrl.hostname)) {
+      return "";
+    }
+  } catch {
+    return configuredUrl;
+  }
+
+  return configuredUrl;
+}
+
+const apiBaseUrl = resolveApiBaseUrl();
 const backendAdminSessionStorageKey = "ai-infraops:backend-admin-web-session";
 const backendAdminClientType = "backend_admin_web";
 
@@ -122,8 +144,8 @@ const fallbackUsers: ApiUser[] = [
 ];
 
 export default function BackendAdminHome() {
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [session, setSession] = useState<LoginResponse | null>(null);
@@ -165,6 +187,7 @@ export default function BackendAdminHome() {
 
   useEffect(() => {
     let alive = true;
+    window.localStorage.removeItem(backendAdminSessionStorageKey);
     const savedSession = readBackendAdminSession();
     if (!savedSession) {
       return;
@@ -186,7 +209,7 @@ export default function BackendAdminHome() {
           return;
         }
         applySession(loginData);
-        window.localStorage.setItem(
+        window.sessionStorage.setItem(
           backendAdminSessionStorageKey,
           JSON.stringify({
             access_token: loginData.access_token,
@@ -213,7 +236,7 @@ export default function BackendAdminHome() {
         setHosts(hostRows);
       })
       .catch(() => {
-        window.localStorage.removeItem(backendAdminSessionStorageKey);
+        window.sessionStorage.removeItem(backendAdminSessionStorageKey);
         if (alive) {
           setSession(null);
         }
@@ -266,7 +289,7 @@ export default function BackendAdminHome() {
 
       const loginData = data as LoginResponse;
       applySession(loginData);
-      window.localStorage.setItem(
+      window.sessionStorage.setItem(
         backendAdminSessionStorageKey,
         JSON.stringify({
           access_token: loginData.access_token,
@@ -286,9 +309,11 @@ export default function BackendAdminHome() {
       setPermissions(permissionRows);
       setMenus(menuRows);
       setHosts(hostRows);
+      setUsername("");
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "登录失败");
     } finally {
+      setPassword("");
       setLoading(false);
     }
   }
@@ -422,7 +447,9 @@ export default function BackendAdminHome() {
         body: JSON.stringify(savedSession),
       }).catch(() => undefined);
     }
-    window.localStorage.removeItem(backendAdminSessionStorageKey);
+    window.sessionStorage.removeItem(backendAdminSessionStorageKey);
+    setUsername("");
+    setPassword("");
     setSession(null);
     setActiveNav("总览");
   }
@@ -454,6 +481,8 @@ export default function BackendAdminHome() {
               <span className="text-sm font-bold text-[#bfc9e7]">管理员账号</span>
               <input
                 className="mt-2 h-14 w-full rounded-[6px] border border-[#1b2fb0] bg-[#070b1b] px-4 text-base text-white outline-none transition placeholder:text-[#bfc9e7]/44 focus:border-[#7f91ff]"
+                autoComplete="username"
+                name="username"
                 onChange={(event) => setUsername(event.target.value)}
                 value={username}
               />
@@ -462,6 +491,8 @@ export default function BackendAdminHome() {
               <span className="text-sm font-bold text-[#bfc9e7]">登录密码</span>
               <input
                 className="mt-2 h-14 w-full rounded-[6px] border border-[#1b2fb0] bg-[#070b1b] px-4 text-base text-white outline-none transition placeholder:text-[#bfc9e7]/44 focus:border-[#7f91ff]"
+                autoComplete="current-password"
+                name="password"
                 onChange={(event) => setPassword(event.target.value)}
                 type="password"
                 value={password}
@@ -1310,7 +1341,7 @@ function backendAdminAuthHeaders(includeJson = false): Record<string, string> {
 
 function readBackendAdminSession(): { access_token: string; client_type: string } | null {
   try {
-    const rawSession = window.localStorage.getItem(backendAdminSessionStorageKey);
+    const rawSession = window.sessionStorage.getItem(backendAdminSessionStorageKey);
     if (!rawSession) {
       return null;
     }

@@ -109,8 +109,10 @@ jiangjun / jiangjun    rd，仅允许访问 3000 的业务系统和中间件系�
 
 ```powershell
 cd services/backend
-micromamba run -n base python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+micromamba run -n base python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+默认 CORS 规则允许通过任意主机名或 IP 访问的 `3000`、`3001` 前端调用该 API。需要收紧来源时，在根目录 `.env` 中设置 `CORS_ORIGIN_REGEX`。
 
 ## 当前 API
 

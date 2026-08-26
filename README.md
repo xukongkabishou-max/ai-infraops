@@ -41,7 +41,7 @@ micromamba run -n base python scripts/init_mysql.py
 
 ```powershell
 cd services/backend
-micromamba run -n base python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+micromamba run -n base python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 等价于：
@@ -56,8 +56,10 @@ npm run dev
 ```text
 http://localhost:3000
 http://localhost:3001
-http://127.0.0.1:8000/health
+http://localhost:8000/health
 ```
+
+三个服务均监听 `0.0.0.0`。本机继续使用上述地址访问；局域网内其他设备使用运行本项目的 Windows 主机 IP，例如 `http://<本机IP>:3000` 和 `http://<本机IP>:3001`。浏览器统一请求前端同源的 `/api/*`，再由 Next.js 在本机反向代理到 `127.0.0.1:8000`，因此局域网客户端不需要直接访问 8000，也不会受到 Python 入站防火墙规则或 CORS 影响。Next.js 开发服务会在启动时把本机所有非回环 IPv4 地址加入 `allowedDevOrigins`；Wi-Fi 地址发生变化后需要重启两个前端。若外部设备无法连接，只需检查 Windows 防火墙中的 `3000`、`3001` TCP 入站端口。
 
 ## 根命令说明
 
@@ -192,6 +194,8 @@ GET /api/doris/instances/{instance_id}/accounts
 user_web            3000 普通用户控制台
 backend_admin_web   3001 后端管理页面
 ```
+
+浏览器端只在当前标签页的 `sessionStorage` 中保存 opaque token，不保存用户名和密码。不同标签页可以分别登录 `admin`、`jiangjun` 等不同账号，关闭标签页后该标签页不再保留本地登录态；服务端 Redis 中的各 token 相互独立。
 
 相关环境变量放在仓库根目录 `.env`，该文件已被 `.gitignore` 忽略：
 

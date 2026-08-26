@@ -89,6 +89,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.cors_origins),
+    allow_origin_regex=settings.cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -177,111 +178,115 @@ def require_superuser(session: dict) -> None:
 
 @app.post("/api/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest, request: Request) -> LoginResponse:
-    users = execute_query(
-        """
-        SELECT id, username, display_name, email, password_hash, is_active, is_superuser
-        FROM rbac_users
-        WHERE username = %s
-        LIMIT 1
-        """,
-        (payload.username,),
-    )
-    if not users:
-        record_audit_event(
-            request,
-            action="login",
-            status_code=401,
-            client_type=payload.client_type,
-            actor_username=payload.username,
-            details={"reason": "invalid_credentials"},
-        )
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
-
-    user = users[0]
-    if not user["is_active"]:
-        record_audit_event(
-            request,
-            action="login",
-            status_code=403,
-            client_type=payload.client_type,
-            actor_username=payload.username,
-            details={"reason": "user_disabled"},
-        )
-        raise HTTPException(status_code=403, detail="用户已被禁用")
-
-    if not password_context.verify(payload.password, user["password_hash"]):
-        record_audit_event(
-            request,
-            action="login",
-            status_code=401,
-            client_type=payload.client_type,
-            actor_username=payload.username,
-            details={"reason": "invalid_credentials"},
-        )
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
-
-    roles = execute_query(
-        """
-        SELECT r.code
-        FROM rbac_roles r
-        JOIN rbac_user_roles ur ON ur.role_id = r.id
-        WHERE ur.user_id = %s AND r.is_active = 1
-        ORDER BY r.code
-        """,
-        (user["id"],),
-    )
-    permissions = execute_query(
-        """
-        SELECT DISTINCT p.code
-        FROM rbac_permissions p
-        JOIN rbac_role_permissions rp ON rp.permission_id = p.id
-        JOIN rbac_user_roles ur ON ur.role_id = rp.role_id
-        WHERE ur.user_id = %s AND p.is_active = 1
-        ORDER BY p.code
-        """,
-        (user["id"],),
-    )
-    permission_codes = [item["code"] for item in permissions]
-    if (
-        payload.client_type == "backend_admin_web"
-        and not user["is_superuser"]
-        and "admin:console:access" not in permission_codes
-    ):
-        record_audit_event(
-            request,
-            action="login",
-            status_code=403,
-            client_type=payload.client_type,
-            actor_username=payload.username,
-            details={"reason": "admin_console_forbidden"},
-        )
-        raise HTTPException(status_code=403, detail="当前账号无权访问后台管理页面")
-
-    menus = execute_query(
-        """
-        SELECT DISTINCT m.id, m.title, m.code, m.path, m.icon, m.parent_id, m.sort_order
-        FROM rbac_menus m
-        WHERE m.is_active = 1
-          AND m.is_visible = 1
-          AND (
-            %s = 1
-            OR m.permission_id IS NULL
-            OR EXISTS (
-              SELECT 1
-              FROM rbac_user_roles menu_ur
-              JOIN rbac_role_permissions menu_rp ON menu_rp.role_id = menu_ur.role_id
-              WHERE menu_ur.user_id = %s
-                AND menu_rp.permission_id = m.permission_id
-            )
-          )
-        ORDER BY m.sort_order, m.id
-        """,
-        (user["is_superuser"], user["id"]),
-    )
-
     connection = get_connection()
     try:
         with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, username, display_name, email, password_hash, is_active, is_superuser
+                FROM rbac_users
+                WHERE username = %s
+                LIMIT 1
+                """,
+                (payload.username,),
+            )
+            user = cursor.fetchone()
+            if not user:
+                record_audit_event(
+                    request,
+                    action="login",
+                    status_code=401,
+                    client_type=payload.client_type,
+                    actor_username=payload.username,
+                    details={"reason": "invalid_credentials"},
+                )
+                raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+            if not user["is_active"]:
+                record_audit_event(
+                    request,
+                    action="login",
+                    status_code=403,
+                    client_type=payload.client_type,
+                    actor_username=payload.username,
+                    details={"reason": "user_disabled"},
+                )
+                raise HTTPException(status_code=403, detail="用户已被禁用")
+
+            if not password_context.verify(payload.password, user["password_hash"]):
+                record_audit_event(
+                    request,
+                    action="login",
+                    status_code=401,
+                    client_type=payload.client_type,
+                    actor_username=payload.username,
+                    details={"reason": "invalid_credentials"},
+                )
+                raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+            cursor.execute(
+                """
+                SELECT r.code
+                FROM rbac_roles r
+                JOIN rbac_user_roles ur ON ur.role_id = r.id
+                WHERE ur.user_id = %s AND r.is_active = 1
+                ORDER BY r.code
+                """,
+                (user["id"],),
+            )
+            roles = list(cursor.fetchall())
+
+            cursor.execute(
+                """
+                SELECT DISTINCT p.code
+                FROM rbac_permissions p
+                JOIN rbac_role_permissions rp ON rp.permission_id = p.id
+                JOIN rbac_user_roles ur ON ur.role_id = rp.role_id
+                WHERE ur.user_id = %s AND p.is_active = 1
+                ORDER BY p.code
+                """,
+                (user["id"],),
+            )
+            permissions = list(cursor.fetchall())
+            permission_codes = [item["code"] for item in permissions]
+            if (
+                payload.client_type == "backend_admin_web"
+                and not user["is_superuser"]
+                and "admin:console:access" not in permission_codes
+            ):
+                record_audit_event(
+                    request,
+                    action="login",
+                    status_code=403,
+                    client_type=payload.client_type,
+                    actor_username=payload.username,
+                    details={"reason": "admin_console_forbidden"},
+                )
+                raise HTTPException(status_code=403, detail="当前账号无权访问后台管理页面")
+
+            cursor.execute(
+                """
+                SELECT DISTINCT m.id, m.title, m.code, m.path, m.icon, m.parent_id, m.sort_order
+                FROM rbac_menus m
+                WHERE m.is_active = 1
+                  AND m.is_visible = 1
+                  AND (
+                    %s = 1
+                    OR m.permission_id IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM rbac_user_roles menu_ur
+                      JOIN rbac_role_permissions menu_rp ON menu_rp.role_id = menu_ur.role_id
+                      WHERE menu_ur.user_id = %s
+                        AND menu_rp.permission_id = m.permission_id
+                    )
+                  )
+                ORDER BY m.sort_order, m.id
+                """,
+                (user["is_superuser"], user["id"]),
+            )
+            menus = list(cursor.fetchall())
+
             cursor.execute(
                 "UPDATE rbac_users SET last_login_at = %s WHERE id = %s",
                 (datetime.now(timezone.utc).replace(tzinfo=None), user["id"]),

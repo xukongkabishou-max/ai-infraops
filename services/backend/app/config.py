@@ -58,6 +58,10 @@ class Settings:
         "http://localhost:3000",
         "http://localhost:3001",
     )
+    cors_origin_regex: str = os.getenv(
+        "CORS_ORIGIN_REGEX",
+        r"^https?://[^/]+:(3000|3001)$",
+    )
 
 
 settings = Settings()
