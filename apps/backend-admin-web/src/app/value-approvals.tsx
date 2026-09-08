@@ -12,6 +12,24 @@ const control = "min-h-10 rounded-[6px] border border-[#4b5fc6] bg-[#070b1b] px-
 const time = (value: string | null) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-";
 const labels: Record<string, string> = { pending: "待审批", approved: "已通过", rejected: "已拒绝", expired: "已过期" };
 
+function ApprovalFields({ items, className = "" }: { items: Array<[string, unknown]>; className?: string }) {
+  return <dl className={`grid min-w-0 grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2 ${className}`}>
+    {items.map(([label, value]) => <div className="min-w-0" key={label}>
+      <dt className="mb-1.5 text-xs text-[#bfc9e7]/55">{label}</dt>
+      <dd className="break-words text-sm leading-6 text-[#e0e6f5] [overflow-wrap:anywhere]">{value === "" || value == null ? "-" : String(value)}</dd>
+    </div>)}
+  </dl>;
+}
+
+function targetFields(row: Approval): Array<[string, unknown]> {
+  return [
+    ["所属环境", row.environment_name],
+    [row.category === "environment" ? "主机" : "Nacos 实例", row.resource_name],
+    ["Namespace", row.category === "environment" ? row.target.namespace : row.target.namespace_id || "public"],
+    ...(row.category === "environment" ? [["工作负载", `${row.target.kind} / ${row.target.workload}`], ["容器", row.target.container]] as Array<[string, unknown]> : [["Group", row.target.group]] as Array<[string, unknown]>),
+  ];
+}
+
 export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: string; apiBaseUrl: string }) {
   const [rows, setRows] = useState<Approval[]>([]);
   const [total, setTotal] = useState(0);
@@ -76,21 +94,37 @@ export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: strin
     {error ? <p role="alert" className="text-sm text-red-300">{error}</p> : null}
     <h2 className="text-lg font-bold">Key 查看审批 · {total} 条申请</h2>
     {loading ? <p className="text-sm text-[#bfc9e7]">正在加载...</p> : rows.length === 0 ? <p className="py-10 text-center text-[#bfc9e7]">暂无申请</p> : null}
-    <div className="divide-y divide-white/10">{rows.map(row => <article className="min-w-0 space-y-3 py-5" key={row.id}>
-      <div className="flex flex-wrap items-center justify-between gap-3"><h3 className="break-all text-sm font-bold">#{row.id} · {row.requester_name} · {row.category === "environment" ? "环境变量数值" : "Nacos 数值"}</h3><span className={`text-sm ${row.status === "pending" ? "text-yellow-300" : row.status === "approved" ? "text-emerald-300" : "text-[#bfc9e7]"}`}>{labels[row.status]}</span></div>
-      <p className="break-all text-sm">环境：{row.environment_name} / {row.resource_name}</p>
-      <p className="break-all font-mono text-xs text-[#bfc9e7]">{Object.entries(row.target).map(([key, value]) => `${key}: ${value}`).join(" · ")}</p>
-      {row.reason ? <p className="break-all text-sm text-[#bfc9e7]">申请原因：{row.reason}</p> : null}
-      <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-[#bfc9e7]"><span>申请时间：{time(row.created_at)}</span><span>审批人：{row.reviewer_name ?? "-"}</span><span>审批时间：{time(row.reviewed_at)}</span><span>采集时间：{time(row.captured_at)}</span><span>有效期至：{time(row.expires_at)}</span></div>
-      {row.review_note ? <p className="break-all text-sm text-[#bfc9e7]">审批备注：{row.review_note}</p> : null}
-      {row.status === "pending" ? <button className={`${control} bg-[#0a1ae1]`} onClick={() => openReview(row)}>审批</button> : null}
+    <div className="divide-y divide-white/10">{rows.map(row => <article className="min-w-0 space-y-6 py-7" key={row.id}>
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0 flex-1 basis-56">
+          <p className="mb-2 text-xs text-[#bfc9e7]/60">申请 #{row.id} <span className="mx-2 text-white/20">/</span> {row.category === "environment" ? "环境变量数值" : "Nacos 配置"}</p>
+          <h3 className="break-words font-mono text-base font-bold leading-7 text-white [overflow-wrap:anywhere]">{String(row.target.key ?? row.target.data_id ?? "-")}</h3>
+        </div>
+        <div className="flex shrink-0 items-center gap-3">
+          <span className={`rounded-[5px] border px-3 py-1.5 text-xs font-bold ${row.status === "pending" ? "border-yellow-400/25 bg-yellow-400/10 text-yellow-300" : row.status === "approved" ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-300" : "border-white/15 bg-white/5 text-[#bfc9e7]"}`}>{labels[row.status]}</span>
+          {row.status === "pending" ? <button className={`${control} bg-[#0a1ae1]`} onClick={() => openReview(row)}>审批</button> : null}
+        </div>
+      </header>
+      <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,1fr)]">
+        <ApprovalFields className="xl:grid-cols-3" items={targetFields(row)} />
+        <ApprovalFields className="border-t border-white/10 pt-5 xl:grid-cols-1 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-6" items={[["申请人", row.requester_name], ["审批人", row.reviewer_name]]} />
+      </div>
+      <div className="border-y border-white/10 bg-white/[0.025] px-4 py-5 sm:px-5">
+        <ApprovalFields className="xl:grid-cols-4" items={[["申请时间", time(row.created_at)], ["审批时间", time(row.reviewed_at)], ["数值采集时间", time(row.captured_at)], ["查看有效期至", time(row.expires_at)]]} />
+      </div>
+      {row.reason || row.review_note ? <ApprovalFields items={[
+        ...(row.reason ? [["申请原因", row.reason]] as Array<[string, unknown]> : []),
+        ...(row.review_note ? [["审批备注", row.review_note]] as Array<[string, unknown]> : []),
+      ]} /> : null}
     </article>)}</div>
     <div className="flex items-center justify-end gap-3 text-sm"><span>第 {page} 页</span><button className={control} disabled={page <= 1} onClick={() => { setRows([]); setLoading(true); setPage(page-1); }}>上一页</button><button className={control} disabled={page * 20 >= total} onClick={() => { setRows([]); setLoading(true); setPage(page+1); }}>下一页</button></div>
     <dialog ref={dialog} className="m-auto w-[min(580px,calc(100vw-32px))] rounded-[6px] border border-[#4b5fc6] bg-[#070b1b] p-6 text-white backdrop:bg-black/70">
       <form onSubmit={review} className="space-y-4">
         <h3 className="text-lg font-bold">审批申请 #{selected?.id}</h3>
-        <p className="break-all text-sm text-[#bfc9e7]">{selected?.requester_name} · {selected?.environment_name} · {selected?.resource_name}</p>
-        <p className="break-all font-mono text-xs text-[#bfc9e7]">{selected ? Object.entries(selected.target).map(([key, value]) => `${key}: ${value}`).join(" · ") : ""}</p>
+        {selected ? <div className="space-y-5 border-y border-white/10 py-5">
+          <p className="break-words font-mono text-sm font-bold leading-6 [overflow-wrap:anywhere]">{String(selected.target.key ?? selected.target.data_id ?? "-")}</p>
+          <ApprovalFields items={[["申请人", selected.requester_name], ...targetFields(selected)]} />
+        </div> : null}
         <div className="flex gap-6">{[["approved", "同意"], ["rejected", "拒绝"]].map(([value, text]) => <label className="flex items-center gap-2" key={value}><input type="radio" name="decision" value={value} checked={decision === value} onChange={() => setDecision(value)} />{text}</label>)}</div>
         {decision === "approved" ? <label className="block text-sm">有效期（分钟）<input className={`${control} mt-2 block w-full`} type="number" min={5} max={1440} required value={minutes} onChange={e => setMinutes(Number(e.target.value))} /></label> : null}
         <label className="block text-sm">审批备注<textarea className={`${control} mt-2 block min-h-24 w-full`} maxLength={1000} value={note} onChange={e => setNote(e.target.value)} /></label>

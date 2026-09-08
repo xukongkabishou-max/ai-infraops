@@ -16,6 +16,15 @@ const control = "min-h-9 rounded-[6px] border border-[#4b5fc6] px-3 py-2 text-xs
 const statusLabels: Record<string, string> = { pending: "待审批", approved: "已通过", rejected: "已拒绝", expired: "已过期" };
 const time = (value: string | null) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-";
 
+function RecordFields({ items, className = "" }: { items: Array<[string, string | number | null | undefined]>; className?: string }) {
+  return <dl className={`grid min-w-0 grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2 ${className}`}>
+    {items.map(([label, value]) => <div className="min-w-0" key={label}>
+      <dt className="mb-1.5 text-xs text-[#bfc9e7]/55">{label}</dt>
+      <dd className="break-words text-sm leading-6 text-[#e0e6f5] [overflow-wrap:anywhere]">{value === "" || value == null ? "-" : value}</dd>
+    </div>)}
+  </dl>;
+}
+
 export function ValueRequestButton({ target, label, mutate }: { target: Record<string, unknown>; label: string; mutate: WriteApi }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [busy, setBusy] = useState(false);
@@ -96,13 +105,39 @@ export function UserValueRequests({ category, read }: { category: Category; read
         const expired = row.expires_at !== null && Date.parse(row.expires_at) <= clock;
         const status = expired && row.status === "approved" ? "expired" : row.status;
         const snapshot = !expired && status === "approved" ? values[row.id] : undefined;
-        return <article key={row.id} className="min-w-0 space-y-3 py-5">
-          <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h3 className="break-all text-sm font-bold">#{row.id} · {row.environment_name} / {row.resource_name}</h3><p className="mt-2 break-all font-mono text-xs text-[#bfc9e7]">{Object.entries(row.target).map(([key, value]) => `${key}: ${value}`).join(" · ")}</p></div><span className={`shrink-0 text-sm ${status === "approved" ? "text-emerald-300" : status === "pending" ? "text-yellow-300" : "text-[#bfc9e7]"}`}>{statusLabels[status] ?? status}</span></div>
-          {row.reason ? <p className="break-all text-sm text-[#bfc9e7]">申请原因：{row.reason}</p> : null}
-          <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-[#bfc9e7]"><span>申请时间：{time(row.created_at)}</span><span>审批人：{row.reviewer_name ?? "-"}</span><span>审批时间：{time(row.reviewed_at)}</span><span>采集时间：{time(row.captured_at)}</span><span>有效期至：{time(row.expires_at)}</span></div>
-          {row.review_note ? <p className="break-all text-sm text-[#bfc9e7]">审批备注：{row.review_note}</p> : null}
-          {status === "approved" ? <button className={control} disabled={busy !== null} onClick={() => snapshot ? setValues(current => { const next = { ...current }; delete next[row.id]; return next; }) : reveal(row)}>{busy === row.id ? "读取中..." : snapshot ? "隐藏 Value" : "查看已批准的 Value"}</button> : null}
-          {snapshot ? <div className="min-w-0 border-l-2 border-emerald-400 pl-4"><p className="mb-2 break-all text-xs text-emerald-300">数值采集于 {time(snapshot.captured_at)}{snapshot.snapshot.pod_name ? ` · Pod: ${snapshot.snapshot.pod_name} · 容器: ${snapshot.snapshot.container_name}` : ""}</p><pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-all bg-[#04050b] p-4 font-mono text-xs leading-6">{snapshot.snapshot.value === "" ? "（空字符串）" : snapshot.snapshot.value}</pre></div> : null}
+        return <article key={row.id} className="min-w-0 space-y-6 py-7">
+          <header className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0 flex-1 basis-56">
+              <p className="mb-2 text-xs text-[#bfc9e7]/60">申请 #{row.id} <span className="mx-2 text-white/20">/</span> {row.category === "environment" ? "环境变量数值" : "Nacos 配置"}</p>
+              <h3 className="break-words font-mono text-base font-bold leading-7 text-white [overflow-wrap:anywhere]">{row.target.key ?? row.target.data_id}</h3>
+            </div>
+            <span className={`shrink-0 rounded-[5px] border px-3 py-1.5 text-xs font-bold ${status === "approved" ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-300" : status === "pending" ? "border-yellow-400/25 bg-yellow-400/10 text-yellow-300" : "border-white/15 bg-white/5 text-[#bfc9e7]"}`}>{statusLabels[status] ?? status}</span>
+          </header>
+          <RecordFields className="xl:grid-cols-3" items={[
+            ["所属环境", row.environment_name],
+            [row.category === "environment" ? "主机" : "Nacos 实例", row.resource_name],
+            ["Namespace", row.category === "environment" ? row.target.namespace : row.target.namespace_id || "public"],
+            ...(row.category === "environment" ? [["工作负载", `${row.target.kind} / ${row.target.workload}`], ["容器", row.target.container]] as Array<[string, string | number]> : [["Group", row.target.group]] as Array<[string, string | number]>),
+            ["审批人", row.reviewer_name],
+          ]} />
+          <div className="border-y border-white/10 bg-white/[0.025] px-4 py-5 sm:px-5">
+            <RecordFields className="xl:grid-cols-4" items={[["申请时间", time(row.created_at)], ["审批时间", time(row.reviewed_at)], ["数值采集时间", time(row.captured_at)], ["查看有效期至", time(row.expires_at)]]} />
+          </div>
+          {row.reason || row.review_note ? <RecordFields items={[
+            ...(row.reason ? [["申请原因", row.reason]] as Array<[string, string]> : []),
+            ...(row.review_note ? [["审批备注", row.review_note]] as Array<[string, string]> : []),
+          ]} /> : null}
+          {status === "approved" ? <div className="flex flex-wrap items-center justify-between gap-3">
+            <h4 className="text-sm font-bold text-[#e0e6f5]">已批准的数值</h4>
+            <button className={control} disabled={busy !== null} onClick={() => snapshot ? setValues(current => { const next = { ...current }; delete next[row.id]; return next; }) : reveal(row)}>{busy === row.id ? "读取中..." : snapshot ? "隐藏 Value" : "查看已批准的 Value"}</button>
+          </div> : null}
+          {snapshot ? <div className="min-w-0 space-y-4 border-l-2 border-emerald-400 pl-4 sm:pl-5">
+            <RecordFields className="xl:grid-cols-3" items={[
+              ["快照采集时间", time(snapshot.captured_at)],
+              ...(snapshot.snapshot.pod_name ? [["来源 Pod", snapshot.snapshot.pod_name], ["来源容器", snapshot.snapshot.container_name]] as Array<[string, string | undefined]> : []),
+            ]} />
+            <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words bg-[#04050b] px-5 py-4 font-mono text-sm leading-7 text-[#e0f2e9] [overflow-wrap:anywhere]">{snapshot.snapshot.value === "" ? "（空字符串）" : snapshot.snapshot.value}</pre>
+          </div> : null}
         </article>;
       })}
     </div>
