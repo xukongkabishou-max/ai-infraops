@@ -175,6 +175,24 @@ CREATE TABLE IF NOT EXISTS `middleware_instances` (
     FOREIGN KEY (`environment_id`) REFERENCES `infra_environments` (`id`) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `monitoring_platforms` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name` VARCHAR(128) NOT NULL,
+  `platform_type` VARCHAR(32) NOT NULL,
+  `base_url` VARCHAR(2048) NOT NULL,
+  `description` VARCHAR(512) NOT NULL DEFAULT '',
+  `is_enabled` TINYINT(1) NOT NULL DEFAULT 1,
+  `sort_order` INT UNSIGNED NOT NULL DEFAULT 0,
+  `status` ENUM('configured','active','unreachable') NOT NULL DEFAULT 'configured',
+  `last_error` TEXT NULL,
+  `last_checked_at` DATETIME NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_monitoring_platforms_type_url` (`platform_type`, `base_url`(512)),
+  KEY `idx_monitoring_platforms_enabled_sort` (`is_enabled`, `sort_order`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `doris_account_credentials` (
   `middleware_instance_id` BIGINT UNSIGNED NOT NULL,
   `user_identity` VARCHAR(512) NOT NULL,
@@ -273,7 +291,9 @@ VALUES
   ('nacos:catalog:list', '查看 Nacos 配置目录', 'api', '查看 Nacos 命名空间、Group、DataId 和配置格式', 1),
   ('doris:accounts:list', '查看 Doris 账号', 'api', '查看 Doris 用户标识、角色和授权范围', 1),
   ('mysql:accounts:list', '查看 MySQL 账号', 'api', '查看 MySQL 用户标识和账号状态', 1),
-  ('mysql:dashboard:view', '查看 MySQL 仪表盘', 'api', '查看已配置的 MySQL Grafana 仪表盘', 1)
+  ('mysql:dashboard:view', '查看 MySQL 仪表盘', 'api', '查看已配置的 MySQL Grafana 仪表盘', 1),
+  ('monitoring:platform:list', '查看监控平台', 'api', '查看已启用的外部监控平台入口', 1),
+  ('monitoring:platform:manage', '维护监控平台', 'api', '添加、修改、检测和删除外部监控平台', 1)
 ON DUPLICATE KEY UPDATE `name` = VALUES(`name`), `is_active` = 1;
 
 INSERT INTO `rbac_users` (`username`, `password_hash`, `display_name`, `email`, `is_active`, `is_superuser`)

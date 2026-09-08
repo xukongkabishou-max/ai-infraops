@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { UserValueRequests, ValueRequestButton } from "./value-requests";
 
 type UserWebSession = {
   access_token: string;
@@ -19,10 +20,21 @@ type UserWebAuthResponse = UserWebSession & {
   }>;
 };
 
+type MonitoringPlatformOption = {
+  id: number;
+  name: string;
+  platform_type: string;
+  base_url: string;
+  description: string;
+  sort_order: number;
+  status: "configured" | "active" | "unreachable";
+  last_checked_at?: string | null;
+};
+
 type SectionKey = "machine" | "business" | "middleware" | "monitoring";
 type MachinePageKey = "environmentApis" | "machineAccounts" | "middlewareAccounts";
-type BusinessPageKey = "nodePorts" | "imageTags" | "gpuModels" | "envKeys";
-type MiddlewarePageKey = "nacosKeys" | "healthChecks";
+type BusinessPageKey = "nodePorts" | "imageTags" | "gpuModels" | "envKeys" | "approvals";
+type MiddlewarePageKey = "nacosKeys" | "healthChecks" | "approvals";
 
 type ResourceHostOption = {
   host_id: number;
@@ -135,6 +147,7 @@ type EnvWorkload = {
 };
 
 type EnvKeyResult = {
+  request_host_id?: number;
   namespace: string;
   workload: { kind: "Deployment" | "StatefulSet"; name: string };
   pod_name: string;
@@ -322,13 +335,6 @@ const healthCheckRows = [
   { middleware: "Doris", check: "写入临时表并执行聚合查询，验证 FE/BE 查询链路", status: "脚本预留" },
   { middleware: "Redis", check: "写入临时 key，读取校验 TTL，删除临时 key", status: "脚本预留" },
   { middleware: "Kafka", check: "生产测试消息并由临时 consumer group 消费确认", status: "脚本预留" },
-];
-
-const monitoringCards = [
-  { title: "Prometheus 指标入口", detail: "统一登记 Prometheus 数据源、抓取任务和关键指标查询模板。" },
-  { title: "Loki 日志入口", detail: "按环境、命名空间、服务名和 Trace ID 拼接日志查询地址。" },
-  { title: "告警中心", detail: "后续聚合未恢复告警、告警责任人、静默窗口和处理记录。" },
-  { title: "SLO 守护", detail: "预留核心业务 SLO、错误预算和服务可用性趋势展示。" },
 ];
 
 function resolveApiBaseUrl() {
@@ -1724,6 +1730,7 @@ function BusinessSystemView({
     { key: "imageTags", label: "镜像管理", hint: "按环境和 namespace 查看镜像" },
     { key: "gpuModels", label: "GPU 模型显存", hint: "模型、显存与空闲卡" },
     { key: "envKeys", label: "环境变量 key", hint: "只展示 key，不展示 value" },
+    { key: "approvals", label: "我的审批记录", hint: "环境变量数值" },
   ];
 
   return (
@@ -1750,6 +1757,7 @@ function BusinessSystemView({
       {activePage === "envKeys" ? (
         <EnvironmentKeyInventoryView />
       ) : null}
+      {activePage === "approvals" ? <UserValueRequests category="environment" read={fetchUserApi} /> : null}
     </div>
   );
 }
@@ -1833,6 +1841,9 @@ function NodePortInventoryView() {
 
   return (
     <SectionBlock title="服务 NodePort 公网调用地址" description="选择所属环境和 Namespace，查询当前 NodePort 类型 Service 的公网调用地址。">
+      <div className="mb-4 rounded-[6px] border border-[#f5c542]/40 bg-[#f5c542]/12 px-4 py-3 text-sm font-bold leading-6 text-[#ffe28a]">
+        某些环境的网络可能有 NAT 管理，需要做端口映射。公网访问不通属于正常现象，需要联系运维确定真实原因。
+      </div>
       <div className="grid gap-4 rounded-[6px] border border-white/10 bg-[#070b1b] p-4 md:grid-cols-2 xl:grid-cols-[1.2fr_1fr_auto]">
         <label className="block">
           <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">所属环境 / 主机</span>
@@ -2001,7 +2012,7 @@ function EnvironmentKeyInventoryView() {
       const data = await fetchUserApi<EnvKeyResult>(
         `/api/k8s/env/keys?host_id=${hostId}&namespace=${encodeURIComponent(namespace)}&kind=${workload.kind}&workload=${encodeURIComponent(workload.name)}`,
       );
-      setResult(data);
+      setResult({ ...data, request_host_id: Number(hostId) });
       setResultRevision((current) => current + 1);
     } catch (queryError) {
       setError(queryError instanceof Error ? queryError.message : "环境变量 Key 查询失败");
@@ -2060,6 +2071,7 @@ function EnvironmentKeyInventoryView() {
           {result.containers.map((container) => (
             <EnvironmentKeyContainerList
               container={container}
+              target={{ category: "environment", host_id: result.request_host_id, namespace: result.namespace, kind: result.workload.kind, workload: result.workload.name, container: container.container_name }}
               key={`${resultRevision}-${container.container_name}`}
             />
           ))}
@@ -2071,8 +2083,10 @@ function EnvironmentKeyInventoryView() {
 
 function EnvironmentKeyContainerList({
   container,
+  target,
 }: {
   container: EnvKeyResult["containers"][number];
+  target: Record<string, unknown>;
 }) {
   const [page, setPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
@@ -2154,9 +2168,10 @@ function EnvironmentKeyContainerList({
             <>
               <ol className="divide-y divide-white/8 border-b border-white/8">
                 {visibleKeys.map((key, index) => (
-                  <li className="grid min-h-11 grid-cols-[3rem_minmax(0,1fr)] items-center gap-3 py-2" key={key}>
+                  <li className="grid min-h-11 grid-cols-[3rem_minmax(0,1fr)] items-center gap-3 py-2 md:grid-cols-[3rem_minmax(0,1fr)_auto]" key={key}>
                     <span className="text-right font-mono text-xs tabular-nums text-[#bfc9e7]/38">{startIndex + index + 1}</span>
                     <code className="break-all font-mono text-sm text-[#c7d0ef]">{key}</code>
+                    <div className="col-span-2 md:col-span-1"><ValueRequestButton target={{ ...target, key }} label={`${target.namespace} / ${target.workload} / ${container.container_name} / ${key}`} mutate={mutateUserApi} /></div>
                   </li>
                 ))}
               </ol>
@@ -2582,6 +2597,7 @@ function MiddlewareSystemView({
   const pages: Array<{ key: MiddlewarePageKey; label: string; hint: string }> = [
     { key: "nacosKeys", label: "Nacos 配置目录", hint: "Namespace、Group 与配置名称" },
     { key: "healthChecks", label: "数据库可用性校验", hint: "MySQL、Doris、Redis、Kafka" },
+    { key: "approvals", label: "我的审批记录", hint: "Nacos 配置数值" },
   ];
   const selectedNamespace = nacosCatalog?.namespaces.find(
     (namespace) => namespace.namespace_id === selectedNamespaceId,
@@ -2756,6 +2772,7 @@ function MiddlewareSystemView({
                                               </div>
                                               <div className="flex items-center gap-3">
                                                 <span className="text-xs font-bold text-[#7dd3fc]">{nacosStructure.key_count} 个 Key</span>
+                                                <ValueRequestButton target={{ category: "nacos", instance_id: Number(selectedNacosId), namespace_id: selectedNamespace.namespace_id, group: config.group, data_id: config.data_id }} label={`${selectedNamespace.namespace_id || "public"} / ${config.group} / ${config.data_id}`} mutate={mutateUserApi} />
                                                 <button
                                                   className="h-8 rounded-[6px] border border-[#29356f] px-3 text-xs font-bold text-[#9fb0ff] hover:border-[#4b5fc6] hover:text-white"
                                                   onClick={clearNacosStructure}
@@ -2790,6 +2807,7 @@ function MiddlewareSystemView({
         </SectionBlock>
       ) : null}
 
+      {activePage === "approvals" ? <UserValueRequests category="nacos" read={fetchUserApi} /> : null}
       {activePage === "healthChecks" ? (
         <SectionBlock title="核心数据库可用性快速校验" description="可用性脚本仍为预留功能；MySQL 支持跳转后台登记的 Grafana 仪表盘。">
         <div className="grid gap-4 lg:grid-cols-2">
@@ -2833,26 +2851,58 @@ function MiddlewareSystemView({
 }
 
 function MonitoringIntegrationView() {
+  const [platforms, setPlatforms] = useState<MonitoringPlatformOption[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchUserApi<MonitoringPlatformOption[]>("/api/monitoring/platforms", controller.signal)
+      .then(setPlatforms)
+      .catch((loadError) => {
+        if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+          setError(loadError instanceof Error ? loadError.message : "监控平台加载失败");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
   return (
     <div className="space-y-5">
-      <SectionBlock title="待接入监控能力" description="当前只先搭页面骨架，等数据源和权限边界明确后再接入真实 API。">
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {monitoringCards.map((card) => (
-            <div className="rounded-[6px] border border-white/10 bg-[#070b1b] p-5" key={card.title}>
-              <p className="text-sm font-black text-white">{card.title}</p>
-              <p className="mt-3 text-sm leading-6 text-[#bfc9e7]/64">{card.detail}</p>
-              <div className="mt-5 h-2 rounded-full bg-[#11183c]">
-                <div className="h-2 w-1/4 rounded-full bg-[#4b5fc6]" />
-              </div>
-            </div>
-          ))}
-        </div>
+      <SectionBlock title="监控平台入口" description="平台地址由后台独立维护，监控数据与当前运维平台保持解耦。">
+        {loading ? <p className="py-10 text-center text-sm text-[#bfc9e7]/60">正在加载监控平台...</p> : null}
+        {error ? <p className="rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-4 py-3 text-sm text-[#ff9aa3]">{error}</p> : null}
+        {!loading && !error ? (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {platforms.map((platform) => (
+              <article className="rounded-[6px] border border-white/10 bg-[#070b1b] p-5" key={platform.id}>
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-base font-black text-white">{platform.name}</p>
+                    <p className="mt-1 text-xs uppercase text-[#4b5fc6]">{platform.platform_type}</p>
+                  </div>
+                  <span className={`rounded-full px-3 py-1 text-xs font-bold ${platform.status === "active" ? "bg-[#0a1ae1]/30 text-[#9fb0ff]" : platform.status === "unreachable" ? "bg-[#a30613]/24 text-[#ff6b76]" : "bg-white/8 text-[#bfc9e7]/64"}`}>
+                    {platform.status === "active" ? "可访问" : platform.status === "unreachable" ? "连接异常" : "待检测"}
+                  </span>
+                </div>
+                <p className="mt-4 min-h-12 text-sm leading-6 text-[#bfc9e7]/64">{platform.description || "统一查看监控指标、仪表盘和告警信息。"}</p>
+                <a className="mt-5 inline-flex h-10 items-center border border-[#4b5fc6] px-4 text-sm font-bold text-[#bfc9e7] transition hover:bg-[#0a1ae1] hover:text-white" href={platform.base_url} rel="noopener noreferrer" target="_blank">
+                  打开监控平台
+                </a>
+              </article>
+            ))}
+            {platforms.length === 0 ? <p className="py-10 text-center text-sm text-[#bfc9e7]/60 md:col-span-2 xl:col-span-3">暂无已启用的监控平台。</p> : null}
+          </div>
+        ) : null}
       </SectionBlock>
 
-      <div className="rounded-[8px] border border-dashed border-white/14 bg-[#04050b]/52 p-8 text-center">
-        <p className="text-lg font-black text-white">监控系统集成暂定</p>
-        <p className="mx-auto mt-3 max-w-2xl text-sm leading-6 text-[#bfc9e7]/68">
-          后续可以在这里接入 Prometheus 查询模板、Loki 日志检索、Alertmanager 告警流、Grafana 跳转和统一 SLO 面板。
+      <div className="rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5">
+        <p className="text-sm font-black text-white">访问边界</p>
+        <p className="mt-2 text-sm leading-6 text-[#bfc9e7]/68">
+          当前页面只维护外部平台入口，不复制监控数据和第三方登录状态。访问权限和数据权限由目标监控平台独立控制。
         </p>
       </div>
     </div>

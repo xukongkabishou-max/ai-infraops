@@ -65,6 +65,12 @@ class NodePortServiceTests(TestCase):
 
 
 class NodeResourceTests(TestCase):
+    def test_formats_invalid_client_pem_error(self) -> None:
+        self.assertEqual(
+            k8s_client._safe_error(RuntimeError("[SSL] PEM lib (_ssl.c:3927)")),
+            "K8S 客户端证书或私钥无法解析：请重新粘贴完整 kubeconfig",
+        )
+
     def test_requests_structured_prometheus_response(self) -> None:
         api_client = Mock()
         api_client.call_api.return_value = {

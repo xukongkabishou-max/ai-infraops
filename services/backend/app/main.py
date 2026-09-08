@@ -16,7 +16,12 @@ from .audit import (
     record_audit_event,
 )
 from .config import settings
-from .credential_crypto import encrypt_credential, validate_kubeconfig
+from .credential_crypto import (
+    decrypt_credential,
+    encrypt_credential,
+    normalize_kubeconfig_tls,
+    validate_kubeconfig,
+)
 from .db import execute_query, get_connection
 from .doris_client import (
     DorisIntegrationError,
@@ -47,6 +52,10 @@ from .middleware_crypto import (
     encrypt_middleware_password,
     encrypt_mysql_account_password,
 )
+from .monitoring_platform_client import (
+    MonitoringPlatformProbeError,
+    probe_monitoring_platform,
+)
 from .mysql_client import (
     MySQLIntegrationError,
     fetch_mysql_accounts,
@@ -71,10 +80,12 @@ from .schemas import (
     LoginResponse,
     MiddlewareInstanceCreateRequest,
     MiddlewareInstanceUpdateRequest,
+    MonitoringPlatformRequest,
     NacosConfigStructureRequest,
     SessionRequest,
 )
 from .session_store import delete_session, load_session, save_session
+from .value_access import build_value_access_router
 
 password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log_file = configure_logging()
@@ -471,6 +482,197 @@ def list_environments(
         ORDER BY e.name, e.id
         """
     )
+
+
+@app.get("/api/monitoring/platforms")
+def list_public_monitoring_platforms(
+    user_session: dict = Depends(require_user_web_session),
+) -> list[dict]:
+    require_permission(user_session, "monitoring:platform:list")
+    return execute_query(
+        """
+        SELECT id, name, platform_type, base_url, description,
+               sort_order, status, last_checked_at
+        FROM monitoring_platforms
+        WHERE is_enabled = 1
+        ORDER BY sort_order, id
+        """
+    )
+
+
+@app.get("/api/admin/monitoring-platforms")
+def list_admin_monitoring_platforms(
+    admin_session: dict = Depends(require_backend_admin_session),
+) -> list[dict]:
+    require_permission(admin_session, "monitoring:platform:manage")
+    return execute_query(
+        """
+        SELECT id, name, platform_type, base_url, description,
+               is_enabled, sort_order, status, last_error,
+               last_checked_at, created_at, updated_at
+        FROM monitoring_platforms
+        ORDER BY sort_order, id
+        """
+    )
+
+
+@app.post("/api/admin/monitoring-platforms")
+def create_monitoring_platform(
+    payload: MonitoringPlatformRequest,
+    admin_session: dict = Depends(require_backend_admin_session),
+) -> dict:
+    require_permission(admin_session, "monitoring:platform:manage")
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO monitoring_platforms (
+                    name, platform_type, base_url, description,
+                    is_enabled, sort_order, status
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, 'configured')
+                """,
+                (
+                    payload.name,
+                    payload.platform_type,
+                    payload.base_url,
+                    payload.description,
+                    payload.is_enabled,
+                    payload.sort_order,
+                ),
+            )
+            platform_id = cursor.lastrowid
+        connection.commit()
+    except IntegrityError as exc:
+        connection.rollback()
+        raise HTTPException(status_code=409, detail="该类型和地址的监控平台已存在") from exc
+    finally:
+        connection.close()
+    logger.info(
+        "监控平台已添加",
+        extra={"event": "monitoring_platform_created", "monitoring_platform_id": platform_id},
+    )
+    return get_monitoring_platform(platform_id)
+
+
+@app.put("/api/admin/monitoring-platforms/{platform_id}")
+def update_monitoring_platform(
+    platform_id: int,
+    payload: MonitoringPlatformRequest,
+    admin_session: dict = Depends(require_backend_admin_session),
+) -> dict:
+    require_permission(admin_session, "monitoring:platform:manage")
+    get_monitoring_platform(platform_id)
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE monitoring_platforms
+                SET name = %s,
+                    platform_type = %s,
+                    base_url = %s,
+                    description = %s,
+                    is_enabled = %s,
+                    sort_order = %s,
+                    status = 'configured',
+                    last_error = NULL
+                WHERE id = %s
+                """,
+                (
+                    payload.name,
+                    payload.platform_type,
+                    payload.base_url,
+                    payload.description,
+                    payload.is_enabled,
+                    payload.sort_order,
+                    platform_id,
+                ),
+            )
+        connection.commit()
+    except IntegrityError as exc:
+        connection.rollback()
+        raise HTTPException(status_code=409, detail="该类型和地址的监控平台已存在") from exc
+    finally:
+        connection.close()
+    logger.info(
+        "监控平台已更新",
+        extra={"event": "monitoring_platform_updated", "monitoring_platform_id": platform_id},
+    )
+    return get_monitoring_platform(platform_id)
+
+
+@app.post("/api/admin/monitoring-platforms/{platform_id}/probe")
+def probe_registered_monitoring_platform(
+    platform_id: int,
+    admin_session: dict = Depends(require_backend_admin_session),
+) -> dict:
+    require_permission(admin_session, "monitoring:platform:manage")
+    platform = get_monitoring_platform(platform_id)
+    try:
+        probe_monitoring_platform(platform["base_url"])
+        status = "active"
+        error = None
+    except MonitoringPlatformProbeError as exc:
+        status = "unreachable"
+        error = str(exc)
+
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE monitoring_platforms
+                SET status = %s, last_error = %s, last_checked_at = NOW()
+                WHERE id = %s
+                """,
+                (status, error, platform_id),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+    return get_monitoring_platform(platform_id)
+
+
+@app.delete("/api/admin/monitoring-platforms/{platform_id}")
+def delete_monitoring_platform(
+    platform_id: int,
+    admin_session: dict = Depends(require_backend_admin_session),
+) -> dict:
+    require_permission(admin_session, "monitoring:platform:manage")
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM monitoring_platforms WHERE id = %s", (platform_id,))
+            affected = cursor.rowcount
+        connection.commit()
+    finally:
+        connection.close()
+    if affected == 0:
+        raise HTTPException(status_code=404, detail="监控平台不存在")
+    logger.info(
+        "监控平台已删除",
+        extra={"event": "monitoring_platform_deleted", "monitoring_platform_id": platform_id},
+    )
+    return {"deleted": True, "id": platform_id}
+
+
+def get_monitoring_platform(platform_id: int) -> dict:
+    rows = execute_query(
+        """
+        SELECT id, name, platform_type, base_url, description,
+               is_enabled, sort_order, status, last_error,
+               last_checked_at, created_at, updated_at
+        FROM monitoring_platforms
+        WHERE id = %s
+        LIMIT 1
+        """,
+        (platform_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="监控平台不存在")
+    return rows[0]
 
 
 @app.get("/api/middleware/instances")
@@ -1815,8 +2017,12 @@ def create_k8s_cluster(
 ) -> dict:
     require_permission(admin_session, "k8s:cluster:create")
     try:
-        validate_kubeconfig(payload.credential_content)
-        ciphertext, nonce, fingerprint = encrypt_credential(payload.credential_content)
+        credential_content = normalize_kubeconfig_tls(
+            payload.credential_content,
+            skip_tls_verify=not payload.verify_ssl,
+        )
+        validate_kubeconfig(credential_content)
+        ciphertext, nonce, fingerprint = encrypt_credential(credential_content)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not execute_query(
@@ -2182,6 +2388,11 @@ def list_hosts(
                    WHERE c.host_id = h.id
                    LIMIT 1
                ) AS k8s_credential_name,
+               COALESCE((
+                   SELECT NOT c.verify_ssl FROM k8s_clusters c
+                   WHERE c.host_id = h.id
+                   LIMIT 1
+               ), 1) AS k8s_skip_tls_verify,
                EXISTS(
                    SELECT 1 FROM k8s_clusters c
                    WHERE c.host_id = h.id
@@ -2242,6 +2453,10 @@ def save_host(payload: HostCreateRequest, host_id: int | None = None) -> dict:
     encrypted_credential: tuple[bytes, bytes, str] | None = None
     if credential_content:
         try:
+            credential_content = normalize_kubeconfig_tls(
+                credential_content,
+                skip_tls_verify=payload.k8s_skip_tls_verify,
+            )
             validate_kubeconfig(credential_content)
             encrypted_credential = encrypt_credential(credential_content)
         except (RuntimeError, ValueError) as exc:
@@ -2314,6 +2529,7 @@ def save_host(payload: HostCreateRequest, host_id: int | None = None) -> dict:
         environment_id=environment_id,
         credential_name=credential_name or f"{hostname}.yaml",
         encrypted_credential=encrypted_credential,
+        verify_ssl=not payload.k8s_skip_tls_verify,
     )
 
     saved_host = get_host_by_id(host_id)
@@ -2565,6 +2781,11 @@ def get_host_by_id(host_id: int) -> dict:
                    WHERE c.host_id = h.id
                    LIMIT 1
                ) AS k8s_credential_name,
+               COALESCE((
+                   SELECT NOT c.verify_ssl FROM k8s_clusters c
+                   WHERE c.host_id = h.id
+                   LIMIT 1
+               ), 1) AS k8s_skip_tls_verify,
                EXISTS(
                    SELECT 1 FROM k8s_clusters c
                    WHERE c.host_id = h.id
@@ -2734,27 +2955,48 @@ def sync_host_k8s_cluster(
     environment_id: int,
     credential_name: str,
     encrypted_credential: tuple[bytes, bytes, str] | None,
+    verify_ssl: bool,
 ) -> None:
     connection = get_connection()
     try:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT id FROM k8s_clusters WHERE host_id = %s LIMIT 1",
+                """
+                SELECT id, credential_name, credential_ciphertext, credential_nonce
+                FROM k8s_clusters
+                WHERE host_id = %s
+                LIMIT 1
+                """,
                 (host_id,),
             )
             existing = cursor.fetchone()
             if encrypted_credential is None:
                 if existing:
-                    cursor.execute(
-                        """
-                        UPDATE k8s_clusters
-                        SET environment_id = %s, name = %s
-                        WHERE host_id = %s
-                        """,
-                        (environment_id, f"host-{host_id}", host_id),
-                    )
-                connection.commit()
-                return
+                    if existing.get("credential_ciphertext") and existing.get("credential_nonce"):
+                        existing_content = decrypt_credential(
+                            bytes(existing["credential_ciphertext"]),
+                            bytes(existing["credential_nonce"]),
+                        )
+                        normalized_content = normalize_kubeconfig_tls(
+                            existing_content,
+                            skip_tls_verify=not verify_ssl,
+                        )
+                        encrypted_credential = encrypt_credential(normalized_content)
+                        credential_name = existing.get("credential_name") or credential_name
+                    else:
+                        cursor.execute(
+                            """
+                            UPDATE k8s_clusters
+                            SET environment_id = %s, name = %s, verify_ssl = %s
+                            WHERE host_id = %s
+                            """,
+                            (environment_id, f"host-{host_id}", verify_ssl, host_id),
+                        )
+                        connection.commit()
+                        return
+                else:
+                    connection.commit()
+                    return
 
             ciphertext, nonce, fingerprint = encrypted_credential
             cursor.execute(
@@ -2764,7 +3006,7 @@ def sync_host_k8s_cluster(
                     credential_name, credential_ciphertext, credential_nonce,
                     credential_fingerprint, context_name, verify_ssl, status, last_error
                 )
-                VALUES (%s, %s, %s, '', '', %s, %s, %s, %s, '', 1, 'configured', NULL)
+                VALUES (%s, %s, %s, '', '', %s, %s, %s, %s, '', %s, 'configured', NULL)
                 ON DUPLICATE KEY UPDATE
                     environment_id = VALUES(environment_id),
                     name = VALUES(name),
@@ -2773,6 +3015,7 @@ def sync_host_k8s_cluster(
                     credential_ciphertext = VALUES(credential_ciphertext),
                     credential_nonce = VALUES(credential_nonce),
                     credential_fingerprint = VALUES(credential_fingerprint),
+                    verify_ssl = VALUES(verify_ssl),
                     status = 'configured',
                     last_error = NULL
                 """,
@@ -2784,6 +3027,7 @@ def sync_host_k8s_cluster(
                     ciphertext,
                     nonce,
                     fingerprint,
+                    verify_ssl,
                 ),
             )
         connection.commit()
@@ -2876,3 +3120,9 @@ def _format_host_port(host: str, port: int) -> str:
     if ":" in normalized_host and not normalized_host.startswith("["):
         normalized_host = f"[{normalized_host}]"
     return f"{normalized_host}:{port}"
+
+
+app.include_router(build_value_access_router(
+    require_user_web_session, require_backend_admin_session,
+    get_k8s_cluster_by_host, _require_allowed_namespace,
+))

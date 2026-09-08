@@ -114,6 +114,8 @@ micromamba run -n base python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 默认 CORS 规则允许通过任意主机名或 IP 访问的 `3000`、`3001` 前端调用该 API。需要收紧来源时，在根目录 `.env` 中设置 `CORS_ORIGIN_REGEX`。
 
+后台主机表单默认启用“自动跳过 TLS 证书校验”。提交新 kubeconfig 时，后端通过 YAML 解析器为全部 cluster 写入 `insecure-skip-tls-verify: true`，并在加密入库前校验内嵌客户端证书、私钥及二者匹配关系；该选项只跳过 API Server 证书可信链校验，不会绕过 Kubernetes 客户端身份认证。
+
 ## 当前 API
 
 ```text

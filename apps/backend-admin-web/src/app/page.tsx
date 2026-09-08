@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ValueApprovals } from "./value-approvals";
 
 type ApiUser = {
   id: number;
@@ -46,6 +47,7 @@ type HostRecord = {
   status: "active" | "unreachable";
   has_k8s_credential?: boolean | number;
   k8s_credential_name?: string | null;
+  k8s_skip_tls_verify?: boolean | number;
   last_error?: string | null;
   last_seen_at?: string | null;
 };
@@ -76,6 +78,21 @@ type MiddlewareInstance = {
   last_error?: string | null;
   last_seen_at?: string | null;
   created_at: string;
+};
+
+type MonitoringPlatform = {
+  id: number;
+  name: string;
+  platform_type: "backstage" | "grafana" | "prometheus" | "loki" | "alertmanager" | "other";
+  base_url: string;
+  description: string;
+  is_enabled: boolean | number;
+  sort_order: number;
+  status: "configured" | "active" | "unreachable";
+  last_error?: string | null;
+  last_checked_at?: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 type AuditEvent = {
@@ -136,7 +153,9 @@ const navItems = [
   "菜单管理",
   "机器资源信息",
   "中间件资源信息",
+  "监控平台",
   "审计日志",
+  "Key 查看审批",
 ];
 
 const fallbackUsers: ApiUser[] = [
@@ -163,6 +182,7 @@ export default function BackendAdminHome() {
   const [environmentName, setEnvironmentName] = useState("");
   const [namespaceKeysText, setNamespaceKeysText] = useState("");
   const [k8sCredentialContent, setK8sCredentialContent] = useState("");
+  const [k8sSkipTlsVerify, setK8sSkipTlsVerify] = useState(true);
   const [editingK8sCredentialName, setEditingK8sCredentialName] = useState("");
   const [editingHasK8sCredential, setEditingHasK8sCredential] = useState(false);
   const [editingHostId, setEditingHostId] = useState<number | null>(null);
@@ -338,6 +358,7 @@ export default function BackendAdminHome() {
           namespace_keys: parseNamespaceKeys(namespaceKeysText),
           k8s_credential_name: k8sCredentialContent ? `${hostName}.yaml` : "",
           k8s_credential_content: k8sCredentialContent,
+          k8s_skip_tls_verify: k8sSkipTlsVerify,
         }),
       });
       const data = await response.json();
@@ -371,6 +392,7 @@ export default function BackendAdminHome() {
     setEnvironmentName("");
     setNamespaceKeysText("");
     setK8sCredentialContent("");
+    setK8sSkipTlsVerify(true);
     setEditingK8sCredentialName("");
     setEditingHasK8sCredential(false);
   }
@@ -385,6 +407,7 @@ export default function BackendAdminHome() {
     setEnvironmentName(host.environment_name ?? "");
     setNamespaceKeysText((host.namespace_keys ?? []).join(", "));
     setK8sCredentialContent("");
+    setK8sSkipTlsVerify(host.k8s_skip_tls_verify === undefined ? true : Boolean(host.k8s_skip_tls_verify));
     setEditingK8sCredentialName(host.k8s_credential_name ?? "");
     setEditingHasK8sCredential(Boolean(host.has_k8s_credential));
     setHostError("");
@@ -559,8 +582,12 @@ export default function BackendAdminHome() {
                   ? "添加、删除与检查环境主机"
                   : activeNav === "中间件资源信息"
                     ? "维护中间件实例、账号与权限"
+                    : activeNav === "监控平台"
+                      ? "维护第三方监控平台跳转入口"
                     : activeNav === "审计日志"
                       ? "查询登录、鉴权与接口访问记录"
+                    : activeNav === "Key 查看审批"
+                      ? "环境变量与 Nacos 数值查看审批"
                     : "登录、用户、角色、权限、菜单"}
               </h1>
             </div>
@@ -595,6 +622,7 @@ export default function BackendAdminHome() {
                 privateIp={privateIp}
                 publicIp={publicIp}
                 k8sCredentialContent={k8sCredentialContent}
+                k8sSkipTlsVerify={k8sSkipTlsVerify}
                 namespaceKeysText={namespaceKeysText}
                 onCancelEdit={resetHostForm}
                 onEditHost={handleEditHost}
@@ -609,12 +637,17 @@ export default function BackendAdminHome() {
                 setPrivateIp={setPrivateIp}
                 setPublicIp={setPublicIp}
                 setK8sCredentialContent={setK8sCredentialContent}
+                setK8sSkipTlsVerify={setK8sSkipTlsVerify}
                 setNamespaceKeysText={setNamespaceKeysText}
               />
             ) : activeNav === "中间件资源信息" ? (
               <MiddlewareResourceManager accessToken={session.access_token} />
+            ) : activeNav === "监控平台" ? (
+              <MonitoringPlatformManager accessToken={session.access_token} />
             ) : activeNav === "审计日志" ? (
               <AuditLogView accessToken={session.access_token} />
+            ) : activeNav === "Key 查看审批" ? (
+              <ValueApprovals accessToken={session.access_token} apiBaseUrl={apiBaseUrl} />
             ) : (
               <RbacOverview
                 menus={menus}
@@ -632,6 +665,209 @@ export default function BackendAdminHome() {
 }
 
 const auditPageSize = 20;
+
+function MonitoringPlatformManager({ accessToken }: { accessToken: string }) {
+  const [platforms, setPlatforms] = useState<MonitoringPlatform[]>([]);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [name, setName] = useState("");
+  const [platformType, setPlatformType] = useState<MonitoringPlatform["platform_type"]>("backstage");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [description, setDescription] = useState("");
+  const [isEnabled, setIsEnabled] = useState(true);
+  const [sortOrder, setSortOrder] = useState("0");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [probingId, setProbingId] = useState<number | null>(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const headers = useMemo(
+    () => ({ Authorization: `Bearer ${accessToken}` }),
+    [accessToken],
+  );
+
+  const loadPlatforms = useCallback(async () => {
+    const response = await fetch(`${apiBaseUrl}/api/admin/monitoring-platforms`, { headers });
+    const data = await response.json().catch(() => []);
+    if (!response.ok) {
+      throw new Error(data.detail ?? "监控平台加载失败");
+    }
+    setPlatforms(data as MonitoringPlatform[]);
+  }, [headers]);
+
+  useEffect(() => {
+    loadPlatforms()
+      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "监控平台加载失败"))
+      .finally(() => setLoading(false));
+  }, [loadPlatforms]);
+
+  function resetForm() {
+    setEditingId(null);
+    setName("");
+    setPlatformType("backstage");
+    setBaseUrl("");
+    setDescription("");
+    setIsEnabled(true);
+    setSortOrder("0");
+  }
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/api/admin/monitoring-platforms${editingId ? `/${editingId}` : ""}`,
+        {
+          method: editingId ? "PUT" : "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name,
+            platform_type: platformType,
+            base_url: baseUrl,
+            description,
+            is_enabled: isEnabled,
+            sort_order: Number(sortOrder) || 0,
+          }),
+        },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.detail ?? "监控平台保存失败");
+      }
+      const action = editingId ? "更新" : "添加";
+      resetForm();
+      await loadPlatforms();
+      setNotice(`监控平台已${action}。`);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "监控平台保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleEdit(platform: MonitoringPlatform) {
+    setEditingId(platform.id);
+    setName(platform.name);
+    setPlatformType(platform.platform_type);
+    setBaseUrl(platform.base_url);
+    setDescription(platform.description ?? "");
+    setIsEnabled(Boolean(platform.is_enabled));
+    setSortOrder(String(platform.sort_order));
+    setError("");
+    setNotice("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function handleProbe(platformId: number) {
+    setProbingId(platformId);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/api/admin/monitoring-platforms/${platformId}/probe`,
+        { method: "POST", headers },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.detail ?? "监控平台检测失败");
+      }
+      await loadPlatforms();
+      setNotice(data.status === "active" ? "监控平台连接正常。" : `监控平台无法连接：${data.last_error ?? "未知错误"}`);
+    } catch (probeError) {
+      setError(probeError instanceof Error ? probeError.message : "监控平台检测失败");
+    } finally {
+      setProbingId(null);
+    }
+  }
+
+  async function handleDelete(platformId: number) {
+    setError("");
+    setNotice("");
+    const response = await fetch(`${apiBaseUrl}/api/admin/monitoring-platforms/${platformId}`, {
+      method: "DELETE",
+      headers,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setError(data.detail ?? "监控平台删除失败");
+      return;
+    }
+    if (editingId === platformId) resetForm();
+    await loadPlatforms();
+    setNotice("监控平台已删除。");
+  }
+
+  return (
+    <div className="space-y-5">
+      <form className="grid gap-4 rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur md:grid-cols-2 xl:grid-cols-4" onSubmit={handleSave}>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">平台名称</span>
+          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setName(event.target.value)} placeholder="例如统一监控平台" required value={name} />
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">平台类型</span>
+          <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setPlatformType(event.target.value as MonitoringPlatform["platform_type"])} value={platformType}>
+            <option value="backstage">Backstage</option>
+            <option value="grafana">Grafana</option>
+            <option value="prometheus">Prometheus</option>
+            <option value="loki">Loki</option>
+            <option value="alertmanager">Alertmanager</option>
+            <option value="other">其他</option>
+          </select>
+        </label>
+        <label className="block md:col-span-2">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">平台 URL</span>
+          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://monitoring.example.internal/" required type="url" value={baseUrl} />
+        </label>
+        <label className="block md:col-span-2 xl:col-span-3">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">说明</span>
+          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setDescription(event.target.value)} placeholder="展示平台用途和访问范围" value={description} />
+        </label>
+        <label className="block">
+          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">排序</span>
+          <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]" min={0} onChange={(event) => setSortOrder(event.target.value)} type="number" value={sortOrder} />
+        </label>
+        <label className="inline-flex items-center gap-2 text-sm text-[#bfc9e7]/78 md:col-span-2 xl:col-span-4">
+          <input checked={isEnabled} className="h-4 w-4 accent-[#0a1ae1]" onChange={(event) => setIsEnabled(event.target.checked)} type="checkbox" />
+          在用户端显示该平台
+        </label>
+        <div className="flex gap-3 md:col-span-2 xl:col-span-4">
+          <button className="h-11 flex-1 rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white disabled:opacity-60" disabled={saving} type="submit">{saving ? "保存中..." : editingId ? "更新平台" : "添加平台"}</button>
+          {editingId ? <button className="h-11 rounded-[6px] border border-[#4b5fc6] px-5 text-sm font-bold" onClick={resetForm} type="button">取消编辑</button> : null}
+        </div>
+      </form>
+
+      {error ? <p className="rounded-[6px] border border-[#ff4d5d]/40 bg-[#a30613]/18 px-4 py-3 text-sm text-[#ff9aa3]">{error}</p> : null}
+      {notice ? <p className="rounded-[6px] border border-[#4b5fc6]/60 bg-[#0a1ae1]/16 px-4 py-3 text-sm text-[#bfc9e7]">{notice}</p> : null}
+
+      <article className="rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur">
+        <h2 className="mb-4 text-lg font-black">已配置监控平台</h2>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1100px] text-left text-sm">
+            <thead><tr className="border-b border-white/10 text-[#bfc9e7]/60"><th className="py-3">名称</th><th className="py-3">类型</th><th className="py-3">地址</th><th className="py-3">显示</th><th className="py-3">状态</th><th className="py-3">最近检测</th><th className="py-3 text-right">操作</th></tr></thead>
+            <tbody>
+              {platforms.map((platform) => (
+                <tr className="border-b border-white/8" key={platform.id}>
+                  <td className="py-4 font-bold text-white"><p>{platform.name}</p><p className="mt-1 text-xs font-normal text-[#bfc9e7]/52">{platform.description || "-"}</p></td>
+                  <td className="py-4 text-[#bfc9e7]/78">{platform.platform_type}</td>
+                  <td className="max-w-[360px] break-all py-4 text-[#9fb0ff]">{platform.base_url}</td>
+                  <td className="py-4 text-[#bfc9e7]/78">{platform.is_enabled ? "显示" : "隐藏"}</td>
+                  <td className="py-4"><span className={`rounded-full px-3 py-1 text-xs font-bold ${platform.status === "active" ? "bg-[#0a1ae1]/30 text-[#9fb0ff]" : platform.status === "unreachable" ? "bg-[#a30613]/24 text-[#ff6b76]" : "bg-white/8 text-[#bfc9e7]/64"}`}>{platform.status === "active" ? "可访问" : platform.status === "unreachable" ? "无法连接" : "待检测"}</span>{platform.last_error ? <p className="mt-2 max-w-xs text-xs text-[#ff9aa3]">{platform.last_error}</p> : null}</td>
+                  <td className="py-4 text-xs text-[#bfc9e7]/58">{platform.last_checked_at ? formatAuditTime(platform.last_checked_at) : "未检测"}</td>
+                  <td className="py-4 text-right"><div className="flex justify-end gap-3"><button className="text-[#9fb0ff]" disabled={probingId === platform.id} onClick={() => handleProbe(platform.id)} type="button">{probingId === platform.id ? "检测中..." : "检测"}</button><button className="text-[#9fb0ff]" onClick={() => handleEdit(platform)} type="button">编辑</button><button className="text-[#ff6b76]" onClick={() => handleDelete(platform.id)} type="button">删除</button></div></td>
+                </tr>
+              ))}
+              {!loading && platforms.length === 0 ? <tr><td className="py-10 text-center text-[#bfc9e7]/52" colSpan={7}>暂无监控平台</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </div>
+  );
+}
+
 
 function AuditLogView({ accessToken }: { accessToken: string }) {
   const [events, setEvents] = useState<AuditEvent[]>([]);
@@ -1461,6 +1697,7 @@ function MachineHostManager({
   environmentName,
   namespaceKeysText,
   k8sCredentialContent,
+  k8sSkipTlsVerify,
   editingHostId,
   editingHasK8sCredential,
   editingK8sCredentialName,
@@ -1476,6 +1713,7 @@ function MachineHostManager({
   setEnvironmentName,
   setNamespaceKeysText,
   setK8sCredentialContent,
+  setK8sSkipTlsVerify,
   onSaveHost,
   onEditHost,
   onProbeHost,
@@ -1491,6 +1729,7 @@ function MachineHostManager({
   environmentName: string;
   namespaceKeysText: string;
   k8sCredentialContent: string;
+  k8sSkipTlsVerify: boolean;
   editingHostId: number | null;
   editingHasK8sCredential: boolean;
   editingK8sCredentialName: string;
@@ -1506,6 +1745,7 @@ function MachineHostManager({
   setEnvironmentName: (value: string) => void;
   setNamespaceKeysText: (value: string) => void;
   setK8sCredentialContent: (value: string) => void;
+  setK8sSkipTlsVerify: (value: boolean) => void;
   onSaveHost: (event: FormEvent<HTMLFormElement>) => void;
   onEditHost: (host: HostRecord) => void;
   onProbeHost: (hostId: number) => void;
@@ -1545,15 +1785,27 @@ function MachineHostManager({
           <input className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 font-mono text-sm outline-none focus:border-[#7f91ff]" onChange={(event) => setNamespaceKeysText(event.target.value)} placeholder="例如 dev, prod（逗号、空格或换行分隔）" value={namespaceKeysText} />
           <span className="mt-1 block text-xs text-[#bfc9e7]/52">用户端只能查询这些 Namespace 下 Pod 的环境变量名称；留空表示不开放该能力。</span>
         </label>
-        <label className="block md:col-span-2 xl:col-span-3">
-          <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">K8S 凭证内容</span>
+        <div className="block md:col-span-2 xl:col-span-3">
+          <span className="mb-2 flex flex-wrap items-center gap-4 text-xs font-bold text-[#bfc9e7]/60">
+            <span>K8S 凭证内容</span>
+            <span className="inline-flex items-center gap-2 text-[#bfc9e7]/78">
+              <input
+                checked={k8sSkipTlsVerify}
+                className="h-4 w-4 accent-[#0a1ae1]"
+                onChange={(event) => setK8sSkipTlsVerify(event.target.checked)}
+                type="checkbox"
+              />
+              自动跳过 TLS 证书校验
+            </span>
+          </span>
           <textarea className="min-h-52 w-full resize-y rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 py-3 font-mono text-xs leading-5 outline-none focus:border-[#7f91ff]" onChange={(event) => setK8sCredentialContent(event.target.value)} placeholder="可选：在这里粘贴完整 kubeconfig YAML 内容" value={k8sCredentialContent} />
+          <span className="mt-1 block text-xs text-[#bfc9e7]/52">勾选后，后端会为 kubeconfig 中所有 cluster 自动写入 insecure-skip-tls-verify: true。</span>
           {editingHostId ? (
             <span className="mt-1 block text-xs text-[#bfc9e7]/52">
               当前凭证：{editingHasK8sCredential ? `${editingK8sCredentialName || "历史凭证（原文件名未记录）"}（已加密保存）` : "未配置"}。凭证正文不回显；留空会保留原凭证，粘贴新内容会覆盖更新。
             </span>
           ) : null}
-        </label>
+        </div>
         <div className="flex gap-3 md:col-span-2 xl:col-span-3">
           <button className="h-11 flex-1 rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white transition hover:bg-[#1628ff] disabled:cursor-not-allowed disabled:opacity-60" disabled={hostSaving} type="submit">
             {hostSaving ? "检测并保存中..." : editingHostId ? "整体更新" : "整体提交"}

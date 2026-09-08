@@ -37,6 +37,7 @@ class HostCreateRequest(BaseModel):
     environment_name: str = Field(min_length=1, max_length=128)
     k8s_credential_name: str = Field(default="", max_length=255)
     k8s_credential_content: str = Field(default="", max_length=1_000_000)
+    k8s_skip_tls_verify: bool = True
     namespace_keys: list[str] = Field(default_factory=list, max_length=100)
 
     @field_validator("linux_agent_url")
@@ -142,6 +143,42 @@ class NacosConfigStructureRequest(BaseModel):
         if not stripped:
             raise ValueError("字段不能为空")
         return stripped
+
+
+class MonitoringPlatformRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    platform_type: Literal[
+        "backstage", "grafana", "prometheus", "loki", "alertmanager", "other"
+    ] = "other"
+    base_url: str = Field(min_length=1, max_length=2048)
+    description: str = Field(default="", max_length=512)
+    is_enabled: bool = True
+    sort_order: int = Field(default=0, ge=0, le=1_000_000)
+
+    @field_validator("name", "description")
+    @classmethod
+    def strip_monitoring_text(cls, value: str, info) -> str:
+        stripped = value.strip()
+        if info.field_name == "name" and not stripped:
+            raise ValueError("平台名称不能为空")
+        return stripped
+
+    @field_validator("base_url")
+    @classmethod
+    def normalize_monitoring_url(cls, value: str) -> str:
+        parts = urlsplit(value.strip())
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            raise ValueError("监控平台地址必须是完整的 HTTP 或 HTTPS URL")
+        if parts.username or parts.password:
+            raise ValueError("监控平台地址不允许包含用户名或密码")
+        try:
+            parts.port
+        except ValueError as exc:
+            raise ValueError("监控平台地址端口无效") from exc
+        normalized_path = parts.path or "/"
+        return urlunsplit(
+            (parts.scheme.lower(), parts.netloc, normalized_path, parts.query, parts.fragment)
+        )
 
 
 class DorisPasswordVerifyRequest(BaseModel):

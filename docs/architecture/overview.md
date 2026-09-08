@@ -15,7 +15,7 @@ AI InfraOps 采用 monorepo 结构，前端、后端服务、共享包、基础�
 - `机器信息管理`：下分 `环境 API 地址`、`机器账号列表`、`中间件账号获取` 三个子页面。环境 API 地址只给研发展示 CPU、内存、根目录磁盘、公网 IP、私网 IP、Loki 日志、K8S Pod 状态与事件的查询地址，不在该子页直接执行查询。
 - `业务系统管理`：下分 `服务 NodePort`、`镜像 tag`、`GPU 模型显存`、`环境变量 key` 四个子页面。NodePort 页通过“已配置凭证的环境主机 → namespace”筛选，实时读取 NodePort Service 并拼接主机公网 IP；镜像页查询真实 Running Pod 镜像；环境变量页只开放后台白名单中的 Namespace，并按 Deployment/StatefulSet 查询一个 Running Pod 的容器 Key。
 - `中间件系统管理`：下分 `Nacos 配置目录`、`数据库可用性校验` 两个子页面。Nacos 配置目录已按 Namespace、Group、DataId 和格式实时查询，并且不读取配置正文；后续选择具体 DataId 时再由后端结构化解析器移除 value 后返回 Key 树。数据库校验后续由后端脚本执行。
-- `监控系统集成`：预留 Prometheus、Loki、告警中心和 SLO 守护等集成入口。
+- `监控系统集成`：从独立监控平台表读取 Backstage、Grafana、Prometheus、Loki 和 Alertmanager 等外部入口，以新窗口跳转；不复制第三方监控数据和认证状态。
 
 静态页面中的示例地址只使用占位值，不记录真实环境 IP、端口、账号或密码。
 

@@ -292,7 +292,14 @@ def get_workload_environment_keys(
     namespace: str,
     kind: str,
     workload_name: str,
+    *,
+    value_container: str | None = None,
+    value_key: str | None = None,
 ) -> dict:
+    if (value_container is None) != (value_key is None):
+        raise K8sIntegrationError("读取值必须指定容器和 Key")
+    if value_key is not None and not value_key.isidentifier():
+        raise K8sIntegrationError("环境变量 Key 无效")
     normalized_kind = kind.strip().lower()
     if normalized_kind not in {"deployment", "statefulset"}:
         raise K8sIntegrationError("仅支持 Deployment 和 StatefulSet")
@@ -364,6 +371,8 @@ def get_workload_environment_keys(
             pod = running_pods[0]
             containers = []
             for container in pod.spec.containers or []:
+                if value_container is not None and container.name != value_container:
+                    continue
                 keys: list[str] = []
                 error: str | None = None
                 try:
@@ -372,7 +381,7 @@ def get_workload_environment_keys(
                         pod.metadata.name,
                         namespace,
                         container=container.name,
-                        command=[
+                        command=["/bin/sh", "-c", 'printenv "$1"', "_", value_key] if value_key is not None else [
                             "/bin/sh",
                             "-c",
                             "xargs -0 -n 1 /bin/sh -c "
@@ -393,6 +402,16 @@ def get_workload_environment_keys(
                     if response.returncode != 0:
                         raise K8sIntegrationError("Pod Exec command failed")
                     output = response.read_stdout()
+                    if value_key is not None:
+                        return {
+                            "namespace": namespace,
+                            "workload": {"kind": kind, "name": workload_name},
+                            "pod_name": pod.metadata.name,
+                            "pod_uid": str(pod.metadata.uid),
+                            "container_name": container.name,
+                            "key": value_key,
+                            "value": str(output).removesuffix("\n"),
+                        }
                     keys = sorted(
                         {
                             line.strip()
@@ -409,6 +428,8 @@ def get_workload_environment_keys(
                     OSError,
                     ValueError,
                 ):
+                    if value_key is not None:
+                        raise K8sIntegrationError("无法读取指定 Key：变量已不存在、容器工具缺失或无 Exec 权限") from None
                     error = "容器不包含 /bin/sh 或 xargs，或当前 K8S 凭证没有 pods/exec 权限"
                 containers.append(
                     {
@@ -422,6 +443,8 @@ def get_workload_environment_keys(
     except _K8S_ERRORS as exc:
         raise K8sIntegrationError(_safe_error(exc)) from exc
 
+    if value_key is not None:
+        raise K8sIntegrationError("指定容器已不存在")
     return {
         "namespace": namespace,
         "workload": {
@@ -825,6 +848,8 @@ def _safe_error(exc: Exception) -> str:
         )
     if "certificate verify failed" in normalized_message:
         return "TLS 证书校验失败：请检查 kubeconfig 中的 CA、server 地址和证书有效期"
+    if "pem lib" in normalized_message:
+        return "K8S 客户端证书或私钥无法解析：请重新粘贴完整 kubeconfig"
     if "connection refused" in normalized_message:
         return "K8S API 连接被拒绝：请检查 6443 端口、安全组和 API Server 监听状态"
     return message[:1000]
