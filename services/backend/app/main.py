@@ -67,7 +67,8 @@ from .nacos_client import (
     fetch_nacos_catalog,
     fetch_nacos_config_content,
 )
-from .nacos_config_redactor import NacosConfigParseError, redact_nacos_config
+from .nacos_config_redactor import NacosConfigParseError
+from .nacos_value_selection import parse_config_document, selection_scope
 from .node_exporter import scrape_node_exporter
 from .schemas import (
     HostCreateRequest,
@@ -1046,9 +1047,11 @@ def get_nacos_catalog(
 def get_nacos_config_structure(
     instance_id: int,
     payload: NacosConfigStructureRequest,
+    response: Response,
     user_session: dict = Depends(require_user_web_session),
 ) -> dict:
     require_permission(user_session, "nacos:config-structure:read")
+    response.headers["Cache-Control"] = "no-store"
     instances = execute_query(
         """
         SELECT m.id, m.environment_id, e.name AS environment_name,
@@ -1078,7 +1081,8 @@ def get_nacos_config_structure(
             payload.group,
             payload.data_id,
         )
-        redacted = redact_nacos_config(content, payload.config_type)
+        redacted = parse_config_document(content, payload.config_type,
+            selection_scope(instance_id, payload.namespace_id, payload.group, payload.data_id, payload.config_type.lower())).public()
     except NacosConfigParseError as exc:
         logger.info(
             "Nacos 配置结构解析失败",

@@ -7,6 +7,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app import value_access as access
+from app import nacos_value_selection as selection
+
+NACOS_SOURCE = '# internal comment\n\npassword: secret\nother: must-stay-hidden\n'
 
 
 @pytest.fixture
@@ -64,13 +67,14 @@ def system(monkeypatch):
     monkeypatch.setattr(access, "get_connection", Connection)
     from app import middleware_crypto
     monkeypatch.setattr(middleware_crypto, "_encryption_key", lambda: b"x" * 32)
+    monkeypatch.setattr(selection, "_encryption_key", lambda: b"x" * 32)
     monkeypatch.setattr(access, "decrypt_middleware_password", lambda *args: "source-password")
     calls = []
     def collect(*args, **kwargs):
         calls.append(kwargs)
         return {"key": kwargs["value_key"], "value": "private\nvalue=1", "pod_name": "pod-at-approval", "container_name": "app"}
     monkeypatch.setattr(access, "get_workload_environment_keys", collect)
-    monkeypatch.setattr(access, "fetch_nacos_config_content", lambda *args: "password: secret\n")
+    monkeypatch.setattr(access, "fetch_nacos_config_content", lambda *args: NACOS_SOURCE)
     current = {"user": 2, "admin": 1, "namespace_allowed": True}
     def namespace(*args):
         if not current["namespace_allowed"]:
@@ -86,6 +90,9 @@ def system(monkeypatch):
 
 def submit(client, category="environment"):
     target = dict(host_id=1, namespace="test", kind="Deployment", workload="app", container="app", key="TEST_KEY") if category == "environment" else dict(instance_id=1, namespace_id="", group="DEFAULT_GROUP", data_id="app.yaml")
+    if category == "nacos":
+        document = selection.parse_config_document(NACOS_SOURCE, "yaml", selection.selection_scope(1, "", "DEFAULT_GROUP", "app.yaml", "yaml"))
+        target.update(line_number=1, config_type="yaml", config_revision=document.revision)
     response = client.post("/api/value-requests", json={"category": category, **target})
     assert response.status_code == 201, response.text
     return response.json()["id"]
@@ -114,7 +121,11 @@ def test_full_workflow_and_user_isolation(system, category):
     assert result.status_code == 200
     assert result.headers["cache-control"] == "no-store, private"
     value = result.json()["snapshot"]["value"]
-    assert value == ("private\nvalue=1" if category == "environment" else "password: secret\n")
+    assert value == ("private\nvalue=1" if category == "environment" else "secret")
+    assert "must-stay-hidden" not in result.text
+    if category == "nacos":
+        assert result.json()["snapshot"]["config_path"] == "/password"
+        assert result.json()["snapshot"]["source_line"] == 3
     assert result.json()["captured_at"].endswith("+00:00")
     stored = db.execute("SELECT snapshot_ciphertext FROM value_access_requests WHERE id=?", (request_id,)).fetchone()[0]
     assert value.encode() not in stored
@@ -195,3 +206,50 @@ def test_concurrent_review_cannot_overwrite_first_decision(system, monkeypatch):
     assert result.status_code == 409
     assert client.get("/api/value-requests").json()["items"][0]["status"] == "rejected"
     assert db.execute("SELECT snapshot_ciphertext FROM value_access_requests WHERE id=?", (request_id,)).fetchone()[0] is None
+
+
+def test_nacos_requires_line_and_current_preview(system):
+    client, _, _, _ = system
+    target = dict(category="nacos", instance_id=1, namespace_id="", group="DEFAULT_GROUP", data_id="app.yaml")
+    assert client.post("/api/value-requests", json=target).status_code == 422
+    assert client.post("/api/value-requests", json={**target, "line_number":1, "config_type":"yaml", "config_revision":"0"*64}).status_code == 409
+    document = selection.parse_config_document(NACOS_SOURCE, "yaml", selection.selection_scope(1, "", "DEFAULT_GROUP", "app.yaml", "yaml"))
+    assert client.post("/api/value-requests", json={**target, "line_number":99, "config_type":"yaml", "config_revision":document.revision}).status_code == 409
+
+
+def test_changed_nacos_or_tampered_path_cannot_be_approved(system, monkeypatch):
+    client, db, _, _ = system
+    request_id = submit(client, "nacos")
+    monkeypatch.setattr(access, "fetch_nacos_config_content", lambda *args: '# another comment\n'+NACOS_SOURCE)
+    response = client.post(f"/api/admin/value-requests/{request_id}/review", json={"decision":"approved"})
+    assert response.status_code == 409
+    assert "secret" not in response.text
+    monkeypatch.setattr(access, "fetch_nacos_config_content", lambda *args: NACOS_SOURCE)
+    raw = db.execute("SELECT target FROM value_access_requests WHERE id=?", (request_id,)).fetchone()[0]
+    target = json.loads(raw)
+    target["config_path"] = "/other"
+    db.execute("UPDATE value_access_requests SET target=? WHERE id=?", (json.dumps(target),request_id))
+    assert client.post(f"/api/admin/value-requests/{request_id}/review", json={"decision":"approved"}).status_code == 409
+    assert db.execute("SELECT snapshot_ciphertext FROM value_access_requests WHERE id=?", (request_id,)).fetchone()[0] is None
+
+
+def test_legacy_whole_config_authorization_is_blocked(system):
+    client, db, _, _ = system
+    request_id = submit(client, "nacos")
+    target = json.loads(db.execute("SELECT target FROM value_access_requests WHERE id=?", (request_id,)).fetchone()[0])
+    del target["scope_version"]
+    db.execute("UPDATE value_access_requests SET target=? WHERE id=?", (json.dumps(target),request_id))
+    assert client.post(f"/api/admin/value-requests/{request_id}/review", json={"decision":"approved"}).status_code == 409
+    db.execute("UPDATE value_access_requests SET status='approved' WHERE id=?", (request_id,))
+    assert client.get(f"/api/value-requests/{request_id}/value").status_code == 410
+    assert client.get("/api/value-requests").json()["items"][0]["status"] == "invalidated"
+
+
+def test_nacos_snapshot_binding_prevents_whole_file_fallback(system):
+    client, db, _, _ = system
+    request_id = submit(client, "nacos")
+    assert client.post(f"/api/admin/value-requests/{request_id}/review", json={"decision":"approved"}).status_code == 200
+    ciphertext, nonce = access._encrypt_password(json.dumps({"value":NACOS_SOURCE}), access.aad(request_id))
+    db.execute("UPDATE value_access_requests SET snapshot_ciphertext=?,snapshot_nonce=? WHERE id=?", (ciphertext,nonce,request_id))
+    result = client.get(f"/api/value-requests/{request_id}/value")
+    assert result.status_code == 410 and "secret" not in result.text

@@ -1,0 +1,107 @@
+import json
+
+import pytest
+
+from app import nacos_value_selection as selection
+from app.nacos_config_redactor import NacosConfigParseError
+
+
+@pytest.fixture(autouse=True)
+def key(monkeypatch):
+    monkeypatch.setattr(selection, "_encryption_key", lambda: b"k" * 32)
+
+
+def parse(content, config_type="yaml"):
+    return selection.parse_config_document(content, config_type, selection.selection_scope(1, "test", "group", "app", config_type))
+
+
+def test_comments_blank_lines_crlf_and_multiline_values_have_exact_mapping():
+    source = '# hidden-comment\r\n\r\ndatabase:\r\n  password: "first-secret" # another-secret\r\n\r\n  cert: |\r\n    cert-line-one\r\n    cert-line-two\r\n  empty: ""\r\n'
+    document = parse(source)
+    public = document.public()
+    assert document.structure == 'database:\n  password: null\n  cert: null\n  empty: null'
+    assert document.select(2)["value"] == "first-secret"
+    assert document.select(2)["config_path"] == "/database/password"
+    assert document.select(2)["source_line"] == 4
+    assert document.select(3)["value"] == "cert-line-one\ncert-line-two\n"
+    assert document.select(3)["source_line"] == 6
+    assert document.select(3)["source_end_line"] == 8
+    assert document.select(4)["value"] == ""
+    for secret in ("first-secret", "hidden-comment", "another-secret", "cert-line-one"):
+        assert secret not in json.dumps(public)
+    with pytest.raises(NacosConfigParseError): document.select(1)
+
+
+def test_inline_yaml_arrays_nested_objects_and_pointer_escaping():
+    document = parse('list: [{"a/b~c": "one-secret"}, "two-secret"]\nother: {key: three-secret}\n')
+    entries = list(document.selections.values())
+    assert [entry["value"] for entry in entries] == ["one-secret", "two-secret", "three-secret"]
+    assert [entry["config_path"] for entry in entries] == ["/list/0/a~1b~0c", "/list/1", "/other/key"]
+    assert len({entry["line_number"] for entry in entries}) == 3
+    assert [entry["source_line"] for entry in entries] == [1,1,2]
+
+
+def test_minified_json_pretty_preview_has_separate_line_for_every_scalar():
+    source = '{"db":{"password":"one-secret","port":3306},"array":[false,null,"two-secret"]}'
+    document = parse(source, "json")
+    assert json.loads(document.structure) == {"db":{"password":None,"port":None},"array":[None,None,None]}
+    entries = list(document.selections.values())
+    assert [entry["value"] for entry in entries] == ["one-secret","3306","false","null","two-secret"]
+    assert all(entry["source_line"] == 1 for entry in entries)
+    assert len({entry["line_number"] for entry in entries}) == 5
+    assert "one-secret" not in json.dumps(document.public())
+
+
+def test_multiline_json_key_and_value_original_lines():
+    document = parse('{\n  "key":\n    "escaped\\nsecret",\n  "empty": ""\n}', "json")
+    assert document.select(2)["source_line"] == 2
+    assert document.select(2)["source_end_line"] == 3
+    assert document.select(2)["value"] == "escaped\nsecret"
+
+
+@pytest.mark.parametrize("content,kind", [
+    ('a: secret\na: another', 'yaml'),
+    ('{"a":1,"a":2}', 'json'),
+    ('base: &base {password: secret}\ncopy: *base', 'yaml'),
+    ('a: &a [*a]', 'yaml'),
+    ('? [a,b]\n: secret', 'yaml'),
+    ('{"a":NaN}', 'json'),
+    ('{"password":"top-secret"', 'json'),
+])
+def test_rejects_ambiguous_or_invalid_documents_without_leaking(content, kind):
+    with pytest.raises(NacosConfigParseError) as error: parse(content, kind)
+    assert "secret" not in str(error.value)
+
+
+def test_version_binds_raw_content_and_instance_scope():
+    document = parse('a: secret\n')
+    target = {"line_number":1,"config_revision":document.revision,**document.select(1)}
+    assert selection.verify_selection(document,target)["value"] == "secret"
+    with pytest.raises(NacosConfigParseError): selection.verify_selection(parse('# comment\na: secret\n'),target)
+    other = selection.parse_config_document('a: secret\n', 'yaml', [2,'test','group','app','yaml'])
+    assert other.revision != document.revision
+    with pytest.raises(NacosConfigParseError): selection.verify_selection(document,{**target,"config_path":"/another"})
+
+
+def test_empty_collections_and_implicit_nulls_cannot_expand_authorization():
+    document = parse('empty_map: {}\nempty_list: []\nmissing:\nnext: secret\n')
+    with pytest.raises(NacosConfigParseError): document.select(1)
+    with pytest.raises(NacosConfigParseError): document.select(2)
+    assert document.select(3)["value"] == "null"
+    assert document.select(3)["source_line"] == 3
+    assert document.select(4)["value"] == "secret"
+
+
+def test_json_escaped_unicode_keys_are_matched_by_decoded_identity():
+    document = parse(r'{"\uD83D\uDE00":"secret"}', 'json')
+    assert document.select(2)["config_path"] == "/\U0001f600"
+    assert document.public()["structure"].encode('utf-8')
+    with pytest.raises(NacosConfigParseError):
+        parse(r'{"\uD83D\uDE00":1,"\ud83d\ude00":2}', 'json')
+
+
+def test_default_namespace_aliases_use_the_same_revision_scope():
+    empty_scope = selection.selection_scope(1, "", "group", "app", "yaml")
+    public_scope = selection.selection_scope(1, "public", "group", "app", "yml")
+    assert empty_scope == public_scope
+    assert selection.parse_config_document('key: secret', 'yaml', empty_scope).revision == selection.parse_config_document('key: secret', 'yml', public_scope).revision

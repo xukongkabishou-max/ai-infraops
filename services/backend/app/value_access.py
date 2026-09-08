@@ -9,6 +9,8 @@ from .db import execute_query, get_connection
 from .k8s_client import get_workload_environment_keys
 from .middleware_crypto import _encrypt_password, _decrypt_password, decrypt_middleware_password
 from .nacos_client import fetch_nacos_config_content
+from .nacos_config_redactor import NacosConfigParseError
+from .nacos_value_selection import parse_config_document, selection_scope, verify_selection
 
 
 class ValueRequest(BaseModel):
@@ -25,6 +27,9 @@ class ValueRequest(BaseModel):
     namespace_id: str = Field(default="", max_length=255)
     group: str = Field(default="", max_length=255)
     data_id: str = Field(default="", max_length=255)
+    line_number: int | None = Field(default=None, ge=1, le=40000, strict=True)
+    config_type: Literal["yaml", "yml", "json"] | None = None
+    config_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_target(self):
@@ -35,10 +40,12 @@ class ValueRequest(BaseModel):
                 raise ValueError("Key 格式无效")
         elif not all((self.instance_id, self.group, self.data_id)):
             raise ValueError("请选择 Nacos 实例、Group 和配置")
+        elif self.category == "nacos" and not all((self.line_number, self.config_type, self.config_revision)):
+            raise ValueError("Nacos 申请必须填写结构行号，并携带当前配置版本")
         return self
 
     def target(self):
-        fields = ("host_id", "namespace", "kind", "workload", "container", "key") if self.category == "environment" else ("instance_id", "namespace_id", "group", "data_id")
+        fields = ("host_id", "namespace", "kind", "workload", "container", "key") if self.category == "environment" else ("instance_id", "namespace_id", "group", "data_id", "line_number", "config_type", "config_revision")
         return self.model_dump(include=set(fields))
 
 
@@ -90,12 +97,32 @@ def decode_target(row):
 def metadata(row):
     result = {key: value for key, value in row.items() if key not in {"snapshot_ciphertext", "snapshot_nonce"}}
     result["target"] = decode_target(row)
-    if row["status"] == "approved" and row["expires_at"] <= now_utc():
+    if row["category"] == "nacos" and not is_scoped_target(result["target"]):
+        result["status"] = "invalidated"
+    elif row["status"] == "approved" and row["expires_at"] <= now_utc():
         result["status"] = "expired"
     for key, value in result.items():
         if isinstance(value, datetime):
             result[key] = value.replace(tzinfo=timezone.utc).isoformat()
     return result
+
+
+def is_scoped_target(target):
+    return target.get("scope_version") == 1 and all(key in target for key in (
+        "line_number", "config_path", "source_line", "source_end_line", "config_revision", "config_type"))
+
+
+def load_document(source, target):
+    try:
+        password = decrypt_middleware_password(source["password_ciphertext"], source["password_nonce"])
+        content = fetch_nacos_config_content(source["base_url"], source["username"], password,
+            target["namespace_id"], target["group"], target["data_id"])
+        return parse_config_document(content, target["config_type"], selection_scope(
+            target["instance_id"], target["namespace_id"], target["group"], target["data_id"], target["config_type"]))
+    except NacosConfigParseError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except Exception:
+        raise HTTPException(502, "无法读取 Nacos 配置，请检查源服务后重试") from None
 
 
 def aad(request_id):
@@ -140,7 +167,15 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
         live_permission(uid, source_permission(payload.category))
         session["_audit_permission"] = source_permission(payload.category)
         target = payload.target()
-        _, environment, resource = check_target(payload.category, target)
+        source, environment, resource = check_target(payload.category, target)
+        if payload.category == "nacos":
+            document = load_document(source, target)
+            try:
+                selected = verify_selection(document, target)
+            except NacosConfigParseError as exc:
+                raise HTTPException(409, str(exc)) from None
+            target.update({key: selected[key] for key in ("config_path", "source_line", "source_end_line")})
+            target["scope_version"] = 1
         connection = get_connection()
         try:
             with connection.cursor() as cursor:
@@ -195,7 +230,7 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
 
     @router.get("/api/admin/value-requests")
     def all_requests(response: Response, category: Literal["environment", "nacos"] | None = None,
-                     status: Literal["pending", "approved", "rejected", "expired"] | None = None,
+                     status: Literal["pending", "approved", "rejected", "expired", "invalidated"] | None = None,
                      page: int = Query(default=1, ge=1), session=Depends(require_admin)):
         admin_access(session)
         return list_records(response, category, page, status)
@@ -208,6 +243,8 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
         if not rows:
             raise HTTPException(404, "申请不存在")
         row = rows[0]
+        if row["category"] == "nacos" and not is_scoped_target(decode_target(row)):
+            raise HTTPException(409, "旧的整份配置申请已失效，请按行号重新申请")
         if row["requester_id"] == session["user"]["id"]:
             raise HTTPException(403, "不能审批自己的申请")
         if row["status"] != "pending":
@@ -222,16 +259,20 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
                     snapshot = get_workload_environment_keys(source, target["namespace"], target["kind"],
                         target["workload"], value_container=target["container"], value_key=target["key"])
                 else:
-                    password = decrypt_middleware_password(source["password_ciphertext"], source["password_nonce"])
-                    content = fetch_nacos_config_content(source["base_url"], source["username"], password,
-                        target["namespace_id"], target["group"], target["data_id"])
-                    snapshot = {**target, "value": content}
+                    document = load_document(source, target)
+                    try:
+                        selected = verify_selection(document, target)
+                    except NacosConfigParseError as exc:
+                        raise HTTPException(409, str(exc)) from None
+                    snapshot = {**target, "value": selected["value"]}
                 captured_at = now_utc()
                 encoded = json.dumps(snapshot, ensure_ascii=False)
                 if len(encoded.encode()) > 2 * 1024 * 1024:
                     raise ValueError("snapshot too large")
                 ciphertext, nonce = _encrypt_password(encoded, aad(request_id))
                 expires_at = captured_at + timedelta(minutes=payload.validity_minutes)
+            except HTTPException:
+                raise
             except Exception:
                 # Do not return source errors, which can contain secret-bearing output.
                 raise HTTPException(502, "采集数值失败，申请仍待审批。请检查源服务、Key 和权限后重试") from None
@@ -264,6 +305,9 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
         if not rows:
             raise HTTPException(404, "申请不存在")
         row = rows[0]
+        target = decode_target(row)
+        if row["category"] == "nacos" and not is_scoped_target(target):
+            raise HTTPException(410, "旧的整份配置授权已失效，请按行号重新申请")
         live_permission(session["user"]["id"], source_permission(row["category"]))
         session["_audit_permission"] = source_permission(row["category"])
         if row["status"] != "approved":
@@ -275,6 +319,11 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
             snapshot = json.loads(_decrypt_password(row["snapshot_ciphertext"], row["snapshot_nonce"], aad(request_id)))
         except Exception:
             raise HTTPException(503, "快照暂时无法读取") from None
+        if row["category"] == "nacos":
+            binding = ("scope_version", "instance_id", "namespace_id", "group", "data_id", "line_number",
+                       "config_path", "source_line", "source_end_line", "config_type", "config_revision")
+            if any(snapshot.get(key) != target.get(key) for key in binding):
+                raise HTTPException(410, "快照授权范围不匹配，请重新申请")
         if row["expires_at"] <= now_utc():
             raise HTTPException(410, "查看授权已过期，请重新申请")
         return {"snapshot": snapshot, "captured_at": row["captured_at"].replace(tzinfo=timezone.utc).isoformat(),

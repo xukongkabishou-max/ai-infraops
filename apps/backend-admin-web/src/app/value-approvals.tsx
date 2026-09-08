@@ -10,7 +10,7 @@ type Approval = {
 };
 const control = "min-h-10 rounded-[6px] border border-[#4b5fc6] bg-[#070b1b] px-3 py-2 text-sm text-[#c9d2f0] disabled:opacity-40";
 const time = (value: string | null) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-";
-const labels: Record<string, string> = { pending: "待审批", approved: "已通过", rejected: "已拒绝", expired: "已过期" };
+const labels: Record<string, string> = { pending: "待审批", approved: "已通过", rejected: "已拒绝", expired: "已过期", invalidated: "已失效" };
 
 function ApprovalFields({ items, className = "" }: { items: Array<[string, unknown]>; className?: string }) {
   return <dl className={`grid min-w-0 grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2 ${className}`}>
@@ -27,6 +27,7 @@ function targetFields(row: Approval): Array<[string, unknown]> {
     [row.category === "environment" ? "主机" : "Nacos 实例", row.resource_name],
     ["Namespace", row.category === "environment" ? row.target.namespace : row.target.namespace_id || "public"],
     ...(row.category === "environment" ? [["工作负载", `${row.target.kind} / ${row.target.workload}`], ["容器", row.target.container]] as Array<[string, unknown]> : [["Group", row.target.group]] as Array<[string, unknown]>),
+    ...(row.category === "nacos" && row.target.line_number ? [["结构行号", row.target.line_number], ["配置路径", row.target.config_path], ["原文行号", row.target.source_line === row.target.source_end_line ? row.target.source_line : `${row.target.source_line}-${row.target.source_end_line}`]] as Array<[string, unknown]> : []),
   ];
 }
 

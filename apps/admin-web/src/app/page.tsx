@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { UserValueRequests, ValueRequestButton } from "./value-requests";
+import { UserValueRequests, ValueRequestButton, type NacosLine } from "./value-requests";
 
 type UserWebSession = {
   access_token: string;
@@ -205,6 +205,9 @@ type NacosConfigStructure = {
   format: "yaml" | "json";
   key_count: number;
   structure: string;
+  config_revision: string;
+  line_count: number;
+  selectable_lines: NacosLine[];
 };
 
 type MysqlDashboardOption = {
@@ -2468,6 +2471,10 @@ function MiddlewareSystemView({
   const [mysqlDashboardError, setMysqlDashboardError] = useState("");
   const nacosStructureRequestId = useRef(0);
   const nacosTableScrollRef = useRef<HTMLDivElement>(null);
+  const nacosLinesByNumber = useMemo(
+    () => new Map((nacosStructure?.selectable_lines ?? []).map(line => [line.line_number, line])),
+    [nacosStructure],
+  );
 
   function clearNacosStructure() {
     nacosStructureRequestId.current += 1;
@@ -2772,7 +2779,7 @@ function MiddlewareSystemView({
                                               </div>
                                               <div className="flex items-center gap-3">
                                                 <span className="text-xs font-bold text-[#7dd3fc]">{nacosStructure.key_count} 个 Key</span>
-                                                <ValueRequestButton target={{ category: "nacos", instance_id: Number(selectedNacosId), namespace_id: selectedNamespace.namespace_id, group: config.group, data_id: config.data_id }} label={`${selectedNamespace.namespace_id || "public"} / ${config.group} / ${config.data_id}`} mutate={mutateUserApi} />
+                                                <ValueRequestButton key={nacosStructure.config_revision} target={{ category: "nacos", instance_id: nacosStructure.instance.id, namespace_id: nacosStructure.namespace_id, group: nacosStructure.group, data_id: nacosStructure.data_id, config_type: nacosStructure.format, config_revision: nacosStructure.config_revision }} selectableLines={nacosStructure.selectable_lines} label={`${nacosStructure.namespace_id || "public"} / ${nacosStructure.group} / ${nacosStructure.data_id}`} mutate={mutateUserApi} />
                                                 <button
                                                   className="h-8 rounded-[6px] border border-[#29356f] px-3 text-xs font-bold text-[#9fb0ff] hover:border-[#4b5fc6] hover:text-white"
                                                   onClick={clearNacosStructure}
@@ -2782,9 +2789,15 @@ function MiddlewareSystemView({
                                                 </button>
                                               </div>
                                             </div>
-                                            <pre className="max-h-[520px] overflow-auto whitespace-pre p-4 font-mono text-xs leading-6 text-[#c9d2f0]">
-                                              {nacosStructure.structure}
-                                            </pre>
+                                            <div className="max-h-[520px] overflow-auto py-3 font-mono text-xs leading-6 text-[#c9d2f0]" aria-label="带行号的脱敏配置结构">
+                                              {nacosStructure.structure.split("\n").map((line, index) => {
+                                                const selection = nacosLinesByNumber.get(index + 1);
+                                                return <div key={index} className="grid min-w-max grid-cols-[4rem_minmax(0,1fr)] hover:bg-white/5">
+                                                  <span className={`sticky left-0 select-none border-r border-white/10 bg-[#050817] pr-3 text-right tabular-nums ${selection ? "text-emerald-300" : "text-[#bfc9e7]/35"}`} title={selection ? `${selection.config_path} · 原文第 ${selection.source_line} 行` : "结构容器行"}>{index + 1}</span>
+                                                  <code className="whitespace-pre px-4">{line || " "}</code>
+                                                </div>;
+                                              })}
+                                            </div>
                                           </div>
                                         ) : null}
                                       </div>
