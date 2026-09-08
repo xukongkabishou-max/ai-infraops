@@ -17,6 +17,8 @@ class ValueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     category: Literal["environment", "nacos"]
     reason: str = Field(default="", max_length=1000)
+    release_ticket: str = Field(default="", max_length=200)
+    release_version: str = Field(default="", max_length=200)
     host_id: int | None = Field(default=None, gt=0)
     namespace: str = Field(default="", max_length=63)
     kind: Literal["Deployment", "StatefulSet"] = "Deployment"
@@ -133,7 +135,7 @@ SELECT_META = """
     SELECT a.id,a.requester_id,u.username AS requester_name,a.category,
            a.environment_name,a.resource_name,a.target,a.reason,a.status,
            a.reviewer_id,r.username AS reviewer_name,a.review_note,a.created_at,
-           a.reviewed_at,a.captured_at,a.expires_at
+           a.reviewed_at,a.captured_at,a.expires_at,a.release_ticket,a.release_version
     FROM value_access_requests a JOIN rbac_users u ON u.id=a.requester_id
     LEFT JOIN rbac_users r ON r.id=a.reviewer_id
 """
@@ -180,9 +182,9 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
         try:
             with connection.cursor() as cursor:
                 cursor.execute("""INSERT INTO value_access_requests
-                    (requester_id,category,environment_name,resource_name,target,reason,created_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-                    (uid, payload.category, environment, resource, json.dumps(target), payload.reason, now_utc()))
+                    (requester_id,category,environment_name,resource_name,target,reason,created_at,release_ticket,release_version)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (uid, payload.category, environment, resource, json.dumps(target), payload.reason, now_utc(), payload.release_ticket, payload.release_version))
                 request_id = cursor.lastrowid
             connection.commit()
         except Exception:
@@ -190,7 +192,7 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
             raise
         finally:
             connection.close()
-        return {"id": request_id, "status": "pending"}
+        return {"id": request_id, "status": "pending", "detail_path": f"/approvals/{request_id}"}
 
     def list_records(response, category, page, status, owner=None):
         response.headers["Cache-Control"] = "no-store"
@@ -234,6 +236,37 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
                      page: int = Query(default=1, ge=1), session=Depends(require_admin)):
         admin_access(session)
         return list_records(response, category, page, status)
+
+    @router.get("/api/value-requests/{request_id}")
+    def request_detail(request_id: int, response: Response, session=Depends(require_user)):
+        response.headers["Cache-Control"] = "no-store, private"
+        rows = execute_query(SELECT_META + " WHERE a.id=%s", (request_id,))
+        if not rows:
+            raise HTTPException(404, "申请不存在或无权访问")
+        row = rows[0]
+        owner = row["requester_id"] == session["user"]["id"]
+        administrator = False
+        try:
+            admin_access(session)
+            administrator = True
+        except HTTPException as exc:
+            if exc.status_code != 403:
+                raise
+        if owner:
+            session["_audit_permission"] = source_permission(row["category"])
+            live_permission(session["user"]["id"], source_permission(row["category"]))
+        elif not administrator:
+            raise HTTPException(404, "申请不存在或无权访问")
+        item = metadata(row)
+        item["can_review"] = administrator and not owner and item["status"] == "pending"
+        item["can_view_value"] = owner and item["status"] == "approved"
+        return {"items": [item], "total": 1, "page": 1,
+                "server_now": now_utc().replace(tzinfo=timezone.utc).isoformat()}
+
+    @router.post("/api/value-requests/{request_id}/review")
+    def review_from_detail(request_id: int, payload: ValueReview, response: Response, session=Depends(require_user)):
+        # The shared detail page uses a user-web login; the same live administrator checks still apply.
+        return review(request_id, payload, response, session)
 
     @router.post("/api/admin/value-requests/{request_id}/review")
     def review(request_id: int, payload: ValueReview, response: Response, session=Depends(require_admin)):

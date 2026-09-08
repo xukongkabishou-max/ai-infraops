@@ -40,7 +40,8 @@ def system(monkeypatch):
         id INTEGER PRIMARY KEY AUTOINCREMENT, requester_id INT, category TEXT, environment_name TEXT,
         resource_name TEXT,target TEXT,reason TEXT,status TEXT DEFAULT 'pending',reviewer_id INT,
         review_note TEXT DEFAULT '',created_at timestamp,reviewed_at timestamp,captured_at timestamp,
-        expires_at timestamp,snapshot_ciphertext BLOB,snapshot_nonce BLOB);
+        expires_at timestamp,snapshot_ciphertext BLOB,snapshot_nonce BLOB,
+        release_ticket TEXT DEFAULT '',release_version TEXT DEFAULT '');
     """)
 
     def query(sql, params=None):
@@ -253,3 +254,57 @@ def test_nacos_snapshot_binding_prevents_whole_file_fallback(system):
     db.execute("UPDATE value_access_requests SET snapshot_ciphertext=?,snapshot_nonce=? WHERE id=?", (ciphertext,nonce,request_id))
     result = client.get(f"/api/value-requests/{request_id}/value")
     assert result.status_code == 410 and "secret" not in result.text
+
+
+@pytest.mark.parametrize("category", ["environment", "nacos"])
+def test_direct_link_detail_is_visible_only_to_owner_or_live_administrator(system, category):
+    client, db, current, _ = system
+    request_id = submit(client, category)
+    path = f"/api/value-requests/{request_id}"
+    result = client.get(path)
+    assert result.status_code == 200 and result.headers['cache-control'] == 'no-store, private'
+    assert result.json()['items'][0]['requester_name'] == 'alice'
+    assert not result.json()['items'][0]['can_review']
+    current['user'] = 3
+    assert client.get(path).status_code == 404
+    assert client.get(path+'?user=alice').status_code == 404
+    assert client.post(path+'/review', json={'decision':'approved'}).status_code == 403
+    current['user'] = 1
+    assert client.get(path).json()['items'][0]['can_review']
+    assert client.post(path+'/review', json={'decision':'approved'}).status_code == 200
+    detail = client.get(path).json()['items'][0]
+    assert not detail['can_review'] and not detail['can_view_value']
+    assert 'snapshot_ciphertext' not in detail and 'private' not in json.dumps(detail)
+    assert client.get(path+'/value').status_code == 404
+    current['user'] = 2
+    assert client.get(path).json()['items'][0]['can_view_value']
+    db.execute('UPDATE rbac_users SET is_active=0 WHERE id=2')
+    assert client.get(path).status_code == 403
+
+
+def test_release_context_and_detail_path_are_preserved(system):
+    client, _, _, _ = system
+    result = client.post('/api/value-requests', json={
+        'category':'environment','host_id':1,'namespace':'test','workload':'app',
+        'container':'app','key':'TEST_KEY','release_ticket':'REL-2026-019','release_version':'abc1234',
+    })
+    assert result.status_code == 201
+    request_id = result.json()['id']
+    assert result.json()['detail_path'] == f'/approvals/{request_id}'
+    item = client.get(f'/api/value-requests/{request_id}').json()['items'][0]
+    assert item['release_ticket'] == 'REL-2026-019' and item['release_version'] == 'abc1234'
+    assert client.get('/api/value-requests/999999').status_code == 404
+
+
+def test_detail_link_cannot_self_approve_or_reuse_revoked_administrator(system):
+    client, db, current, _ = system
+    current['user'] = 1
+    request_id = submit(client)
+    assert not client.get(f'/api/value-requests/{request_id}').json()['items'][0]['can_review']
+    assert client.post(f'/api/value-requests/{request_id}/review', json={'decision':'approved'}).status_code == 403
+    current['user'] = 2
+    other = submit(client)
+    current['user'] = 1
+    db.execute('UPDATE rbac_users SET is_superuser=0 WHERE id=1')
+    assert client.get(f'/api/value-requests/{other}').status_code == 404
+    assert client.post(f'/api/value-requests/{other}/review', json={'decision':'approved'}).status_code == 403

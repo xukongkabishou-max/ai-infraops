@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ApprovalLink } from "./approval-link";
 
 type Category = "environment" | "nacos";
 export type NacosLine = { line_number: number; config_path: string; source_line: number; source_end_line: number };
@@ -11,6 +12,8 @@ type RequestRecord = {
   target: Record<string, string | number>; reason: string; status: string;
   created_at: string; reviewed_at: string | null; captured_at: string | null;
   expires_at: string | null; reviewer_name: string | null; review_note: string;
+  requester_name: string; release_ticket?: string; release_version?: string;
+  can_review?: boolean; can_view_value?: boolean;
 };
 type Snapshot = { snapshot: { value: string; pod_name?: string; container_name?: string; key?: string }; captured_at: string; expires_at: string; server_now: string };
 const control = "min-h-9 rounded-[6px] border border-[#4b5fc6] px-3 py-2 text-xs font-bold text-[#c9d2f0] disabled:opacity-40";
@@ -29,6 +32,9 @@ function RecordFields({ items, className = "" }: { items: Array<[string, string 
 export function ValueRequestButton({ target, label, mutate, selectableLines }: { target: Record<string, unknown>; label: string; mutate: WriteApi; selectableLines?: NacosLine[] }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [lineNumber, setLineNumber] = useState("");
+  const [releaseTicket, setReleaseTicket] = useState("");
+  const [releaseVersion, setReleaseVersion] = useState("");
+  const [submittedId, setSubmittedId] = useState<number | null>(null);
   const isNacos = target.category === "nacos";
   const selection = selectableLines?.find(line => line.line_number === Number(lineNumber));
   const [busy, setBusy] = useState(false);
@@ -39,15 +45,18 @@ export function ValueRequestButton({ target, label, mutate, selectableLines }: {
     if (busy || (isNacos && !selection)) return;
     setBusy(true); setError("");
     try {
-      const result = await mutate<{ id: number }>("/api/value-requests", "POST", isNacos ? { ...target, line_number: Number(lineNumber) } : target);
+      const body = { ...target, release_ticket: releaseTicket, release_version: releaseVersion, ...(isNacos ? { line_number: Number(lineNumber) } : {}) };
+      const result = await mutate<{ id: number }>("/api/value-requests", "POST", body);
       setMessage(`申请 #${result.id} 已提交，待管理员审批`);
+      setSubmittedId(result.id);
       dialog.current?.close();
     } catch (e) { setError(e instanceof Error ? e.message : "申请失败"); }
     finally { setBusy(false); }
   }
-  return <div className="flex flex-wrap items-center justify-end gap-2 text-left">
+  return <div className="flex max-w-sm flex-wrap items-center justify-end gap-2 text-left">
     <button type="button" className={control} onClick={() => { setError(""); setLineNumber(""); dialog.current?.showModal(); }}>查看具体 Value</button>
     {message ? <span role="status" className="text-xs text-emerald-300">{message}</span> : null}
+    {submittedId ? <ApprovalLink requestId={submittedId} /> : null}
     <dialog ref={dialog} className="m-auto w-[min(560px,calc(100vw-32px))] rounded-[6px] border border-[#4b5fc6] bg-[#070b1b] p-6 text-white backdrop:bg-black/70">
       <form onSubmit={submit} className="space-y-4">
         <h3 className="text-lg font-bold">申请查看 Value</h3>
@@ -59,6 +68,13 @@ export function ValueRequestButton({ target, label, mutate, selectableLines }: {
           {selection ? <RecordFields items={[["对应配置路径", selection.config_path], ["原文行号", selection.source_line === selection.source_end_line ? selection.source_line : `${selection.source_line}–${selection.source_end_line}`]]} /> : lineNumber ? <p className="text-sm text-yellow-300">该行不对应独立配置值</p> : null}
         </div> : null}
         <p className="text-sm">是否确认提交申请？</p>
+        <details className="text-sm text-[#c9d2f0]">
+          <summary className="cursor-pointer">关联上线单（选填）</summary>
+          <div className="mt-4 space-y-4">
+            <label className="block">上线单号<input maxLength={200} value={releaseTicket} onChange={event => setReleaseTicket(event.target.value)} className="mt-2 h-10 w-full rounded-[6px] border border-white/20 bg-[#04050b] px-3" /></label>
+            <label className="block">发布版本 / Commit ID<input maxLength={200} value={releaseVersion} onChange={event => setReleaseVersion(event.target.value)} className="mt-2 h-10 w-full rounded-[6px] border border-white/20 bg-[#04050b] px-3" /></label>
+          </div>
+        </details>
         {error ? <p role="alert" className="text-sm text-red-300">{error}</p> : null}
         <div className="flex justify-end gap-3"><button autoFocus type="button" className={control} onClick={() => dialog.current?.close()}>取消</button><button className={`${control} bg-[#0a1ae1]`} disabled={busy || (isNacos && !selection)}>{busy ? "提交中..." : "确认提交"}</button></div>
       </form>
@@ -66,7 +82,7 @@ export function ValueRequestButton({ target, label, mutate, selectableLines }: {
   </div>;
 }
 
-export function UserValueRequests({ category, read }: { category: Category; read: ReadApi }) {
+export function UserValueRequests({ category, read, requestId, mutate }: { category?: Category; read: ReadApi; requestId?: number; mutate?: WriteApi }) {
   const [rows, setRows] = useState<RequestRecord[]>([]);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
@@ -82,14 +98,15 @@ export function UserValueRequests({ category, read }: { category: Category; read
   const reload = useCallback(() => { generation.current++; setValues({}); setLoading(true); setRevision(v => v + 1); }, []);
   useEffect(() => {
     const controller = new AbortController();
-    const load = () => read<{ items: RequestRecord[]; total: number; server_now: string }>(`/api/value-requests?category=${category}&page=${page}`, controller.signal)
+    const path = requestId ? `/api/value-requests/${requestId}` : `/api/value-requests?category=${category}&page=${page}`;
+    const load = () => read<{ items: RequestRecord[]; total: number; server_now: string }>(path, controller.signal)
       .then(data => { if (!controller.signal.aborted) { clockOffset.current = Date.parse(data.server_now) - Date.now(); setClock(Date.parse(data.server_now)); setRows(data.items); setTotal(data.total); setError(""); } })
       .catch(e => { if (!controller.signal.aborted) { setValues({}); setRows([]); setError(e instanceof Error ? e.message : "加载失败"); } })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     void load();
     const interval = window.setInterval(load, 15000);
     return () => { controller.abort(); window.clearInterval(interval); invalidate(); };
-  }, [category, page, revision, read, invalidate]);
+  }, [category, page, revision, read, invalidate, requestId]);
   useEffect(() => {
     const timer = window.setInterval(() => {
       const now = Date.now() + clockOffset.current; setClock(now);
@@ -107,9 +124,9 @@ export function UserValueRequests({ category, read }: { category: Category; read
     finally { setBusy(null); }
   }
   return <section className="min-w-0 space-y-4 border-t border-white/10 pt-5">
-    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-black">我的审批记录</h2><button className={control} onClick={reload}>刷新</button></div>
+    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-black">{requestId ? "审批详情" : "我的审批记录"}</h2><button className={control} onClick={reload}>刷新</button></div>
     {error ? <p role="alert" className="text-sm text-red-300">{error}</p> : null}
-    {loading ? <p className="text-sm text-[#bfc9e7]">正在加载...</p> : rows.length === 0 ? <p className="py-10 text-center text-[#bfc9e7]">暂无申请记录</p> : null}
+    {loading ? <p className="text-sm text-[#bfc9e7]">正在加载...</p> : rows.length === 0 && !error ? <p className="py-10 text-center text-[#bfc9e7]">暂无申请记录</p> : null}
     <div className="divide-y divide-white/10">
       {rows.map(row => {
         const expired = row.expires_at !== null && Date.parse(row.expires_at) <= clock;
@@ -123,7 +140,9 @@ export function UserValueRequests({ category, read }: { category: Category; read
             </div>
             <span className={`shrink-0 rounded-[5px] border px-3 py-1.5 text-xs font-bold ${status === "approved" ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-300" : status === "pending" ? "border-yellow-400/25 bg-yellow-400/10 text-yellow-300" : "border-white/15 bg-white/5 text-[#bfc9e7]"}`}>{statusLabels[status] ?? status}</span>
           </header>
+          <ApprovalLink requestId={row.id} />
           <RecordFields className="xl:grid-cols-3" items={[
+            ["申请人", row.requester_name],
             ["所属环境", row.environment_name],
             [row.category === "environment" ? "主机" : "Nacos 实例", row.resource_name],
             ["Namespace", row.category === "environment" ? row.target.namespace : row.target.namespace_id || "public"],
@@ -131,6 +150,7 @@ export function UserValueRequests({ category, read }: { category: Category; read
             ["审批人", row.reviewer_name],
             ...(row.category === "nacos" && row.target.line_number ? [["结构行号", row.target.line_number], ["配置路径", row.target.config_path], ["原文行号", row.target.source_line === row.target.source_end_line ? row.target.source_line : `${row.target.source_line}-${row.target.source_end_line}`]] as Array<[string, string | number]> : []),
           ]} />
+          {row.release_ticket || row.release_version ? <RecordFields items={[["上线单号", row.release_ticket], ["发布版本 / Commit ID", row.release_version]]} /> : null}
           <div className="border-y border-white/10 bg-white/[0.025] px-4 py-5 sm:px-5">
             <RecordFields className="xl:grid-cols-4" items={[["申请时间", time(row.created_at)], ["审批时间", time(row.reviewed_at)], ["数值采集时间", time(row.captured_at)], ["查看有效期至", time(row.expires_at)]]} />
           </div>
@@ -138,7 +158,8 @@ export function UserValueRequests({ category, read }: { category: Category; read
             ...(row.reason ? [["申请原因", row.reason]] as Array<[string, string]> : []),
             ...(row.review_note ? [["审批备注", row.review_note]] as Array<[string, string]> : []),
           ]} /> : null}
-          {status === "approved" ? <div className="flex flex-wrap items-center justify-between gap-3">
+          {row.can_review && mutate ? <DetailReview requestId={row.id} mutate={mutate} onReviewed={reload} /> : null}
+          {status === "approved" && row.can_view_value !== false ? <div className="flex flex-wrap items-center justify-between gap-3">
             <h4 className="text-sm font-bold text-[#e0e6f5]">已批准的数值</h4>
             <button className={control} disabled={busy !== null} onClick={() => snapshot ? setValues(current => { const next = { ...current }; delete next[row.id]; return next; }) : reveal(row)}>{busy === row.id ? "读取中..." : snapshot ? "隐藏 Value" : "查看已批准的 Value"}</button>
           </div> : null}
@@ -152,6 +173,34 @@ export function UserValueRequests({ category, read }: { category: Category; read
         </article>;
       })}
     </div>
-    <div className="flex items-center justify-end gap-3 text-xs"><span>共 {total} 条 · 第 {page} 页</span><button className={control} disabled={page <= 1} onClick={() => { reload(); setPage(page-1); }}>上一页</button><button className={control} disabled={page * 20 >= total} onClick={() => { reload(); setPage(page+1); }}>下一页</button></div>
+    {!requestId ? <div className="flex items-center justify-end gap-3 text-xs"><span>共 {total} 条 · 第 {page} 页</span><button className={control} disabled={page <= 1} onClick={() => { reload(); setPage(page-1); }}>上一页</button><button className={control} disabled={page * 20 >= total} onClick={() => { reload(); setPage(page+1); }}>下一页</button></div> : null}
   </section>;
+}
+
+function DetailReview({ requestId, mutate, onReviewed }: { requestId: number; mutate: WriteApi; onReviewed: () => void }) {
+  const [decision, setDecision] = useState("approved");
+  const [minutes, setMinutes] = useState(60);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function review(event: FormEvent) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true); setError("");
+    try {
+      await mutate(`/api/value-requests/${requestId}/review`, "POST", { decision, note, validity_minutes: decision === "approved" ? minutes : 60 });
+      onReviewed();
+    } catch (e) { setError(e instanceof Error ? e.message : "审批失败"); }
+    finally { setBusy(false); }
+  }
+  return <form onSubmit={review} className="space-y-5 border-t border-white/10 pt-5">
+    <h3 className="text-base font-bold">处理申请</h3>
+    <div className="flex gap-6">{[["approved", "同意"], ["rejected", "拒绝"]].map(([value, label]) => <label key={value} className="flex items-center gap-2 text-sm"><input type="radio" name={`decision-${requestId}`} checked={decision === value} onChange={() => setDecision(value)} />{label}</label>)}</div>
+    <div className="grid gap-5 sm:grid-cols-2">
+      {decision === "approved" ? <label className="block text-sm">有效期（分钟）<input type="number" min={5} max={1440} required value={minutes} onChange={event => setMinutes(Number(event.target.value))} className="mt-2 h-11 w-full rounded-[6px] border border-white/20 bg-[#04050b] px-3" /></label> : null}
+      <label className="block text-sm">审批备注<textarea maxLength={1000} value={note} onChange={event => setNote(event.target.value)} className="mt-2 min-h-20 w-full rounded-[6px] border border-white/20 bg-[#04050b] p-3" /></label>
+    </div>
+    {error ? <p role="alert" className="text-sm text-red-300">{error}</p> : null}
+    <button className={`${control} bg-[#0a1ae1]`} disabled={busy}>{busy ? "处理中..." : "确认审批"}</button>
+  </form>;
 }

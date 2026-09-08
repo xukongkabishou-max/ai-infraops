@@ -1,12 +1,14 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { ApprovalLink } from "./approval-link";
 
 type Approval = {
   id: number; requester_name: string; requester_id: number; category: string;
   environment_name: string; resource_name: string; target: Record<string, unknown>;
   reason: string; status: string; created_at: string; reviewed_at: string | null;
   captured_at: string | null; expires_at: string | null; reviewer_name: string | null; review_note: string;
+  release_ticket?: string; release_version?: string;
 };
 const control = "min-h-10 rounded-[6px] border border-[#4b5fc6] bg-[#070b1b] px-3 py-2 text-sm text-[#c9d2f0] disabled:opacity-40";
 const time = (value: string | null) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-";
@@ -106,10 +108,12 @@ export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: strin
           {row.status === "pending" ? <button className={`${control} bg-[#0a1ae1]`} onClick={() => openReview(row)}>审批</button> : null}
         </div>
       </header>
+      <ApprovalLink requestId={row.id} />
       <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,1fr)]">
         <ApprovalFields className="xl:grid-cols-3" items={targetFields(row)} />
         <ApprovalFields className="border-t border-white/10 pt-5 xl:grid-cols-1 xl:border-t-0 xl:border-l xl:pt-0 xl:pl-6" items={[["申请人", row.requester_name], ["审批人", row.reviewer_name]]} />
       </div>
+      {row.release_ticket || row.release_version ? <ApprovalFields items={[["上线单号", row.release_ticket], ["发布版本 / Commit ID", row.release_version]]} /> : null}
       <div className="border-y border-white/10 bg-white/[0.025] px-4 py-5 sm:px-5">
         <ApprovalFields className="xl:grid-cols-4" items={[["申请时间", time(row.created_at)], ["审批时间", time(row.reviewed_at)], ["数值采集时间", time(row.captured_at)], ["查看有效期至", time(row.expires_at)]]} />
       </div>
