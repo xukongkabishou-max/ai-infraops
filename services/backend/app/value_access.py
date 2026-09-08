@@ -14,7 +14,7 @@ from .nacos_client import fetch_nacos_config_content
 class ValueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     category: Literal["environment", "nacos"]
-    reason: str = Field(min_length=1, max_length=1000)
+    reason: str = Field(default="", max_length=1000)
     host_id: int | None = Field(default=None, gt=0)
     namespace: str = Field(default="", max_length=63)
     kind: Literal["Deployment", "StatefulSet"] = "Deployment"

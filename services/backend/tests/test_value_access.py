@@ -86,7 +86,7 @@ def system(monkeypatch):
 
 def submit(client, category="environment"):
     target = dict(host_id=1, namespace="test", kind="Deployment", workload="app", container="app", key="TEST_KEY") if category == "environment" else dict(instance_id=1, namespace_id="", group="DEFAULT_GROUP", data_id="app.yaml")
-    response = client.post("/api/value-requests", json={"category": category, "reason": "debug", **target})
+    response = client.post("/api/value-requests", json={"category": category, **target})
     assert response.status_code == 201, response.text
     return response.json()["id"]
 
@@ -107,6 +107,7 @@ def test_full_workflow_and_user_isolation(system, category):
     assert client.get(path).status_code == 404
     current["user"] = 2
     listing = client.get("/api/value-requests").json()
+    assert listing["items"][0]["reason"] == ""
     assert listing["items"][0]["status"] == "approved"
     assert "snapshot_ciphertext" not in listing["items"][0]
     result = client.get(path)

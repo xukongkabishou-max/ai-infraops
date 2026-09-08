@@ -18,7 +18,6 @@ const time = (value: string | null) => value ? new Date(value).toLocaleString("z
 
 export function ValueRequestButton({ target, label, mutate }: { target: Record<string, unknown>; label: string; mutate: WriteApi }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -27,9 +26,9 @@ export function ValueRequestButton({ target, label, mutate }: { target: Record<s
     if (busy) return;
     setBusy(true); setError("");
     try {
-      const result = await mutate<{ id: number }>("/api/value-requests", "POST", { ...target, reason });
+      const result = await mutate<{ id: number }>("/api/value-requests", "POST", target);
       setMessage(`申请 #${result.id} 已提交，待管理员审批`);
-      dialog.current?.close(); setReason("");
+      dialog.current?.close();
     } catch (e) { setError(e instanceof Error ? e.message : "申请失败"); }
     finally { setBusy(false); }
   }
@@ -40,9 +39,9 @@ export function ValueRequestButton({ target, label, mutate }: { target: Record<s
       <form onSubmit={submit} className="space-y-4">
         <h3 className="text-lg font-bold">申请查看 Value</h3>
         <p className="break-all text-sm text-[#c9d2f0]">{label}</p>
-        <label className="block text-sm">申请原因<textarea autoFocus required maxLength={1000} value={reason} onChange={e => setReason(e.target.value)} className="mt-2 min-h-24 w-full rounded-[6px] border border-white/20 bg-[#04050b] p-3" /></label>
+        <p className="text-sm">是否确认提交申请？</p>
         {error ? <p role="alert" className="text-sm text-red-300">{error}</p> : null}
-        <div className="flex justify-end gap-3"><button type="button" className={control} onClick={() => dialog.current?.close()}>取消</button><button className={`${control} bg-[#0a1ae1]`} disabled={busy || !reason.trim()}>{busy ? "提交中..." : "提交审批"}</button></div>
+        <div className="flex justify-end gap-3"><button autoFocus type="button" className={control} onClick={() => dialog.current?.close()}>取消</button><button className={`${control} bg-[#0a1ae1]`} disabled={busy}>{busy ? "提交中..." : "确认提交"}</button></div>
       </form>
     </dialog>
   </div>;
@@ -99,7 +98,7 @@ export function UserValueRequests({ category, read }: { category: Category; read
         const snapshot = !expired && status === "approved" ? values[row.id] : undefined;
         return <article key={row.id} className="min-w-0 space-y-3 py-5">
           <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h3 className="break-all text-sm font-bold">#{row.id} · {row.environment_name} / {row.resource_name}</h3><p className="mt-2 break-all font-mono text-xs text-[#bfc9e7]">{Object.entries(row.target).map(([key, value]) => `${key}: ${value}`).join(" · ")}</p></div><span className={`shrink-0 text-sm ${status === "approved" ? "text-emerald-300" : status === "pending" ? "text-yellow-300" : "text-[#bfc9e7]"}`}>{statusLabels[status] ?? status}</span></div>
-          <p className="break-all text-sm text-[#bfc9e7]">申请原因：{row.reason}</p>
+          {row.reason ? <p className="break-all text-sm text-[#bfc9e7]">申请原因：{row.reason}</p> : null}
           <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-[#bfc9e7]"><span>申请时间：{time(row.created_at)}</span><span>审批人：{row.reviewer_name ?? "-"}</span><span>审批时间：{time(row.reviewed_at)}</span><span>采集时间：{time(row.captured_at)}</span><span>有效期至：{time(row.expires_at)}</span></div>
           {row.review_note ? <p className="break-all text-sm text-[#bfc9e7]">审批备注：{row.review_note}</p> : null}
           {status === "approved" ? <button className={control} disabled={busy !== null} onClick={() => snapshot ? setValues(current => { const next = { ...current }; delete next[row.id]; return next; }) : reveal(row)}>{busy === row.id ? "读取中..." : snapshot ? "隐藏 Value" : "查看已批准的 Value"}</button> : null}

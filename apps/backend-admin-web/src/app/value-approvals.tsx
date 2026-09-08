@@ -80,7 +80,7 @@ export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: strin
       <div className="flex flex-wrap items-center justify-between gap-3"><h3 className="break-all text-sm font-bold">#{row.id} · {row.requester_name} · {row.category === "environment" ? "环境变量数值" : "Nacos 数值"}</h3><span className={`text-sm ${row.status === "pending" ? "text-yellow-300" : row.status === "approved" ? "text-emerald-300" : "text-[#bfc9e7]"}`}>{labels[row.status]}</span></div>
       <p className="break-all text-sm">环境：{row.environment_name} / {row.resource_name}</p>
       <p className="break-all font-mono text-xs text-[#bfc9e7]">{Object.entries(row.target).map(([key, value]) => `${key}: ${value}`).join(" · ")}</p>
-      <p className="break-all text-sm text-[#bfc9e7]">申请原因：{row.reason}</p>
+      {row.reason ? <p className="break-all text-sm text-[#bfc9e7]">申请原因：{row.reason}</p> : null}
       <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-[#bfc9e7]"><span>申请时间：{time(row.created_at)}</span><span>审批人：{row.reviewer_name ?? "-"}</span><span>审批时间：{time(row.reviewed_at)}</span><span>采集时间：{time(row.captured_at)}</span><span>有效期至：{time(row.expires_at)}</span></div>
       {row.review_note ? <p className="break-all text-sm text-[#bfc9e7]">审批备注：{row.review_note}</p> : null}
       {row.status === "pending" ? <button className={`${control} bg-[#0a1ae1]`} onClick={() => openReview(row)}>审批</button> : null}
