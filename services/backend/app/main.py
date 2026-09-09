@@ -2,12 +2,15 @@ import logging
 import hashlib
 import json
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from passlib.context import CryptContext
 from pymysql.err import IntegrityError
+from starlette.concurrency import run_in_threadpool
 
 from .audit import (
     SecurityAuditMiddleware,
@@ -22,7 +25,7 @@ from .credential_crypto import (
     normalize_kubeconfig_tls,
     validate_kubeconfig,
 )
-from .db import execute_query, get_connection
+from .db import DatabaseBusy, DatabaseUnavailable, dispose_pools, execute_query, get_connection
 from .doris_client import (
     DorisIntegrationError,
     fetch_doris_accounts,
@@ -93,10 +96,19 @@ password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log_file = configure_logging()
 logger = logging.getLogger("infraops.api")
 
+@asynccontextmanager
+async def lifespan(_app):
+    try:
+        yield
+    finally:
+        await run_in_threadpool(dispose_pools)
+
+
 app = FastAPI(
     title="AI InfraOps RBAC API",
     version="0.1.0",
     description="登录、用户、角色、权限、菜单、机器资源信息 API。",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -106,10 +118,17 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "X-Response-Time-Ms", "Server-Timing"],
 )
-app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(SecurityAuditMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
 logger.info("后端日志系统已初始化：%s", log_file, extra={"event": "logging_initialized"})
+
+
+@app.exception_handler(DatabaseBusy)
+@app.exception_handler(DatabaseUnavailable)
+async def database_error(request: Request, exc: Exception):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.get("/health")

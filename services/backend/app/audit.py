@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import logging
+from time import perf_counter
 from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.concurrency import run_in_threadpool
 
 from .db import get_connection
 from .logging_config import request_id_context
+from .request_metrics import add_metric
 
 
 logger = logging.getLogger("infraops.audit")
@@ -36,6 +39,7 @@ def record_audit_event(
     resource_id: str = "",
     details: dict[str, Any] | None = None,
 ) -> None:
+    started = perf_counter()
     session = session or {}
     user = session.get("user", {})
     result = "success" if status_code < 400 else "denied" if status_code in {401, 403} else "error"
@@ -82,8 +86,11 @@ def record_audit_event(
             extra={"event": "security_audit_write_failed", "error_type": type(exc).__name__},
         )
     finally:
-        if connection is not None:
-            connection.close()
+        try:
+            if connection is not None:
+                connection.close()
+        finally:
+            add_metric("audit_ms", (perf_counter() - started) * 1000)
 
 
 class SecurityAuditMiddleware(BaseHTTPMiddleware):
@@ -93,7 +100,7 @@ class SecurityAuditMiddleware(BaseHTTPMiddleware):
         except Exception:
             session = getattr(request.state, "auth_session", None)
             if session:
-                record_audit_event(
+                await run_in_threadpool(record_audit_event,
                     request,
                     action="api_request",
                     status_code=500,
@@ -104,7 +111,7 @@ class SecurityAuditMiddleware(BaseHTTPMiddleware):
 
         session = getattr(request.state, "auth_session", None)
         if session:
-            record_audit_event(
+            await run_in_threadpool(record_audit_event,
                 request,
                 action="api_request",
                 status_code=response.status_code,

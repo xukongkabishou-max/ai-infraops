@@ -24,6 +24,15 @@ LOG_RECORD_FIELDS = (
     "path",
     "status_code",
     "duration_ms",
+    "db_acquire_ms",
+    "db_connect_ms",
+    "db_sql_ms",
+    "db_release_ms",
+    "db_checkouts",
+    "db_new_connections",
+    "db_queries",
+    "audit_ms",
+    "redis_ms",
     "host_id",
     "namespace",
     "result_count",
@@ -83,6 +92,9 @@ def configure_logging() -> Path:
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        from .request_metrics import RequestMetrics, current_metrics
+        metrics = RequestMetrics()
+        metrics_token = current_metrics.set(metrics)
         supplied_request_id = request.headers.get("X-Request-ID", "")
         request_id = (
             supplied_request_id
@@ -96,6 +108,14 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
             response.headers["X-Request-ID"] = request_id
+            response.headers["X-Response-Time-Ms"] = str(duration_ms)
+            timings = metrics.snapshot()
+            response.headers["Server-Timing"] = ", ".join([
+                f"total;dur={duration_ms}",
+                *(f"{name};dur={timings.get(name + '_ms', 0)}" for name in ("db_acquire", "db_connect", "db_sql", "db_release", "redis", "audit")),
+                f"db_queries;desc=\"{int(timings.get('db_queries', 0))} queries\"",
+                f"db_new_connections;desc=\"{int(timings.get('db_new_connections', 0))} connections\"",
+            ])
             logger.info(
                 "请求完成",
                 extra={
@@ -104,6 +124,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     "path": request.url.path,
                     "status_code": response.status_code,
                     "duration_ms": duration_ms,
+                    **timings,
                 },
             )
             return response
@@ -118,8 +139,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     "status_code": 500,
                     "duration_ms": duration_ms,
                     "error_type": type(exc).__name__,
+                    **metrics.snapshot(),
                 },
             )
             raise
         finally:
             request_id_context.reset(token)
+            current_metrics.reset(metrics_token)

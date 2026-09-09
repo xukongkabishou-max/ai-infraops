@@ -112,6 +112,10 @@ export function UserValueRequests({ category, read, requestId, mutate }: { categ
   }
   useEffect(() => {
     const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      if (!controller.signal.aborted) timer = setTimeout(() => { if (document.hidden) schedule(); else void load(); }, 15000);
+    };
     const query = new URLSearchParams({ category: category ?? "", page: String(page) });
     if (filters.from) query.set("date_from", filters.from);
     if (filters.to) query.set("date_to", filters.to);
@@ -121,10 +125,9 @@ export function UserValueRequests({ category, read, requestId, mutate }: { categ
     const load = () => read<{ items: RequestRecord[]; total: number; server_now: string }>(path, controller.signal)
       .then(data => { if (!controller.signal.aborted) { setRows(data.items); setTotal(data.total); setError(""); } })
       .catch(e => { if (!controller.signal.aborted) { setValues({}); setRows([]); setError(errorMessage(e, "加载失败")); } })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+      .finally(() => { if (!controller.signal.aborted) { setLoading(false); schedule(); } });
     void load();
-    const interval = window.setInterval(load, 15000);
-    return () => { controller.abort(); window.clearInterval(interval); invalidate(); };
+    return () => { controller.abort(); clearTimeout(timer); invalidate(); };
   }, [category, page, revision, read, invalidate, requestId, filters]);
   async function reveal(row: RequestRecord) {
     const current = generation.current;
@@ -136,7 +139,7 @@ export function UserValueRequests({ category, read, requestId, mutate }: { categ
     finally { setBusy(null); }
   }
   return <section className="min-w-0 space-y-4 border-t border-white/10 pt-5">
-    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-black">{requestId ? "审批详情" : category === "nacos" ? "Nacos 审批记录" : "环境变量审批记录"}</h2><button className={control} onClick={reload}>刷新</button></div>
+    <div className="flex items-center justify-between gap-3"><h2 className="text-lg font-black">{requestId ? "审批详情" : category === "nacos" ? "Nacos 审批记录" : "环境变量审批记录"}</h2><button className={control} disabled={loading} onClick={reload}>刷新</button></div>
     {!requestId ? <form onSubmit={search} className="flex flex-wrap items-end gap-3 text-xs text-[#bfc9e7]">
       <label>申请开始日期<input type="date" value={from} onChange={event => setFrom(event.target.value)} className={`${control} mt-1 block bg-[#04050b] [color-scheme:dark]`} /></label>
       <label>申请截止日期<input type="date" value={to} min={from || undefined} onChange={event => setTo(event.target.value)} className={`${control} mt-1 block bg-[#04050b] [color-scheme:dark]`} /></label>

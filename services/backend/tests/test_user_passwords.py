@@ -46,6 +46,7 @@ def system(monkeypatch):
     class Redis:
         def __init__(self): self.values = {}
         def get(self, key): return self.values.get(key)
+        def getex(self, key, ex): return self.values.get(key)
         def setex(self, key, ttl, value): self.values[key] = value
         def expire(self, key, ttl): pass
         def delete(self, key): self.values.pop(key, None)

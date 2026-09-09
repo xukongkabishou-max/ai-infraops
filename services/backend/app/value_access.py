@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .db import execute_query, get_connection
+from .db import execute_query, execute_queries, get_connection
 from .k8s_client import get_workload_environment_keys
 from .middleware_crypto import _encrypt_password, _decrypt_password, decrypt_middleware_password
 from .nacos_client import fetch_nacos_config_content
@@ -63,16 +63,23 @@ def now_utc():
 
 
 def live_permission(user_id, permission):
+    return live_permissions(user_id, (permission,))
+
+
+def live_permissions(user_id, permissions):
+    if not permissions:
+        raise ValueError("权限列表不能为空")
     # Read current grants so a cached login cannot outlive a permission revocation.
-    rows = execute_query("""
+    placeholders = ",".join(["%s"] * len(permissions))
+    rows = execute_query(f"""
         SELECT u.id FROM rbac_users u WHERE u.id=%s AND u.is_active=1 AND
-        (u.is_superuser=1 OR EXISTS (
-          SELECT 1 FROM rbac_user_roles ur
+        (u.is_superuser=1 OR (
+          SELECT COUNT(DISTINCT p.code) FROM rbac_user_roles ur
           JOIN rbac_roles r ON r.id=ur.role_id AND r.is_active=1
           JOIN rbac_role_permissions rp ON rp.role_id=r.id
           JOIN rbac_permissions p ON p.id=rp.permission_id AND p.is_active=1
-          WHERE ur.user_id=u.id AND p.code=%s))
-    """, (user_id, permission))
+          WHERE ur.user_id=u.id AND p.code IN ({placeholders}))=%s)
+    """, (user_id, *permissions, len(permissions)))
     if not rows:
         raise HTTPException(403, "当前账号没有此操作权限")
 
@@ -158,8 +165,7 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
         return instance, instance["environment_name"], instance["instance_name"]
 
     def admin_access(session):
-        live_permission(session["user"]["id"], "admin:console:access")
-        live_permission(session["user"]["id"], "value:approve")
+        live_permissions(session["user"]["id"], ("admin:console:access", "value:approve"))
         session["_audit_permission"] = "value:approve"
 
     @router.post("/api/value-requests", status_code=201)
@@ -230,8 +236,11 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
                 clauses.append("a.status=%s")
                 params.append(status)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        count = execute_query("SELECT COUNT(*) AS total FROM value_access_requests a JOIN rbac_users u ON u.id=a.requester_id" + where, tuple(params))[0]["total"]
-        rows = execute_query(SELECT_META + where + " ORDER BY a.created_at DESC,a.id DESC LIMIT 20 OFFSET %s", (*params, (page-1)*20))
+        counts, rows = execute_queries([
+            ("SELECT COUNT(*) AS total FROM value_access_requests a JOIN rbac_users u ON u.id=a.requester_id" + where, tuple(params)),
+            (SELECT_META + where + " ORDER BY a.created_at DESC,a.id DESC LIMIT 20 OFFSET %s", (*params, (page-1)*20)),
+        ])
+        count = counts[0]["total"]
         return {"items": [metadata(row) for row in rows], "total": count, "page": page,
                 "server_now": now_utc().replace(tzinfo=timezone.utc).isoformat()}
 

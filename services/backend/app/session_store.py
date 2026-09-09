@@ -5,6 +5,9 @@ import redis
 
 from .config import settings
 from .db import execute_query
+from .request_metrics import measure
+
+_getex_supported = True
 
 
 @lru_cache(maxsize=1)
@@ -35,8 +38,20 @@ def save_session(client_type: str, token: str, payload: dict) -> None:
 
 
 def load_session(client_type: str, token: str) -> dict | None:
+    global _getex_supported
     client = get_redis_client()
-    raw_payload = client.get(session_key(client_type, token))
+    refreshed = False
+    with measure("redis_ms"):
+        if _getex_supported:
+            try:
+                raw_payload = client.getex(session_key(client_type, token), ex=settings.session_ttl_seconds)
+                refreshed = True
+            except redis.ResponseError as exc:
+                if "unknown command" not in str(exc).lower():
+                    raise
+                _getex_supported = False
+        if not refreshed:
+            raw_payload = client.get(session_key(client_type, token))
     if not raw_payload:
         return None
     payload = json.loads(raw_payload)
@@ -46,7 +61,9 @@ def load_session(client_type: str, token: str) -> dict | None:
         client.delete(session_key(client_type, token))
         return None
     payload["user"]["isSuperuser"] = bool(users[0]["is_superuser"])
-    client.expire(session_key(client_type, token), settings.session_ttl_seconds)
+    if not refreshed:
+        with measure("redis_ms"):
+            client.expire(session_key(client_type, token), settings.session_ttl_seconds)
     return payload
 
 

@@ -65,6 +65,7 @@ def system(monkeypatch):
         def close(self): pass
 
     monkeypatch.setattr(access, "execute_query", lambda sql, params=None: [dict(row) for row in query(sql, params)])
+    monkeypatch.setattr(access, "execute_queries", lambda statements: [[dict(row) for row in query(sql, params)] for sql, params in statements])
     monkeypatch.setattr(access, "get_connection", Connection)
     from app import middleware_crypto
     monkeypatch.setattr(middleware_crypto, "_encryption_key", lambda: b"x" * 32)

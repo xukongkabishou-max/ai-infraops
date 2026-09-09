@@ -61,6 +61,10 @@ export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: strin
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      if (!controller.signal.aborted) timer = setTimeout(() => { if (document.hidden) schedule(); else void load(); }, 15000);
+    };
     const query = new URLSearchParams({ page: String(page) });
     if (category) query.set("category", category);
     if (status) query.set("status", status);
@@ -74,11 +78,10 @@ export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: strin
         if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "加载失败");
         if (!controller.signal.aborted) { setRows(data.items); setTotal(data.total); setError(""); }
       } catch (e) { if (!controller.signal.aborted) { setSnapshots({}); setRows([]); setError(errorMessage(e, "加载失败")); } }
-      finally { if (!controller.signal.aborted) setLoading(false); }
+      finally { if (!controller.signal.aborted) { setLoading(false); schedule(); } }
     };
     void load();
-    const interval = window.setInterval(load, 15000);
-    return () => { controller.abort(); window.clearInterval(interval); };
+    return () => { controller.abort(); clearTimeout(timer); };
   }, [accessToken, apiBaseUrl, category, status, page, revision, filters]);
   function clearSnapshots() { snapshotGeneration.current++; setSnapshots({}); setExpandedId(null); }
   function search(event: FormEvent) {
@@ -120,7 +123,7 @@ export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: strin
     <div className="flex flex-wrap items-end gap-4">
       <label className="text-xs text-[#bfc9e7]">申请类别<select className={`${control} mt-2 block`} value={category} onChange={e => { clearSnapshots(); setRows([]); setLoading(true); setPage(1); setCategory(e.target.value); }}><option value="">全部类别</option><option value="environment">环境变量数值</option><option value="nacos">Nacos 数值</option></select></label>
       <label className="text-xs text-[#bfc9e7]">审批状态<select className={`${control} mt-2 block`} value={status} onChange={e => { clearSnapshots(); setRows([]); setLoading(true); setPage(1); setStatus(e.target.value); }}><option value="">全部状态</option>{Object.entries(labels).map(([value, text]) => <option value={value} key={value}>{text}</option>)}</select></label>
-      <button className={control} onClick={() => { clearSnapshots(); setLoading(true); setRevision(v => v+1); }}>刷新</button>
+      <button className={control} disabled={loading} onClick={() => { clearSnapshots(); setLoading(true); setRevision(v => v+1); }}>刷新</button>
     </div>
     <form onSubmit={search} className="flex flex-wrap items-end gap-3 text-xs text-[#bfc9e7]">
       <label>申请开始日期<input type="date" value={from} onChange={event => setFrom(event.target.value)} className={`${control} mt-1 block [color-scheme:dark]`} /></label>
