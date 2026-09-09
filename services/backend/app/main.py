@@ -1,4 +1,5 @@
 import logging
+import asyncio
 import hashlib
 import json
 import secrets
@@ -91,6 +92,8 @@ from .schemas import (
 from .session_store import delete_session, load_session, save_session
 from .value_access import build_value_access_router
 from .user_passwords import build_user_password_router
+from .database_accounts import build_database_account_router, expiry_loop
+from .database_account_client import dispose_pools as dispose_account_pools
 
 password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log_file = configure_logging()
@@ -98,9 +101,14 @@ logger = logging.getLogger("infraops.api")
 
 @asynccontextmanager
 async def lifespan(_app):
+    expiry_stop = asyncio.Event()
+    expiry_task = asyncio.create_task(expiry_loop(expiry_stop))
     try:
         yield
     finally:
+        expiry_stop.set()
+        await expiry_task
+        await run_in_threadpool(dispose_account_pools)
         await run_in_threadpool(dispose_pools)
 
 
@@ -3153,3 +3161,4 @@ app.include_router(build_value_access_router(
     get_k8s_cluster_by_host, _require_allowed_namespace,
 ))
 app.include_router(build_user_password_router(require_backend_admin_session, password_context))
+app.include_router(build_database_account_router(require_backend_admin_session))

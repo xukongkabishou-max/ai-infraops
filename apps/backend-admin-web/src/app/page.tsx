@@ -1,5 +1,7 @@
 "use client";
 
+import { DatabaseAccounts } from "./database-accounts";
+
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ValueApprovals } from "./value-approvals";
 import { UserManagement } from "./user-management";
@@ -650,7 +652,7 @@ export default function BackendAdminHome() {
                 setNamespaceKeysText={setNamespaceKeysText}
               />
             ) : activeNav === "中间件资源信息" ? (
-              <MiddlewareResourceManager accessToken={session.access_token} />
+              <MiddlewareResourceManager accessToken={session.access_token} canManageDatabaseAccounts={session.user.username === "admin" && Boolean(session.user.isSuperuser)} />
             ) : activeNav === "监控平台" ? (
               <MonitoringPlatformManager accessToken={session.access_token} />
             ) : activeNav === "审计日志" ? (
@@ -1086,9 +1088,9 @@ function auditResultClass(result: AuditEvent["result"]) {
   return "bg-[#5a3a0b] text-[#ffd37a]";
 }
 
-const middlewareViews = ["中间件实例", "账号资产", "权限范围"] as const;
+const middlewareViews = ["中间件实例", "账号资产", "权限范围", "数据库账号管理"] as const;
 
-function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
+function MiddlewareResourceManager({ accessToken, canManageDatabaseAccounts }: { accessToken: string; canManageDatabaseAccounts: boolean }) {
   const [activeView, setActiveView] = useState<(typeof middlewareViews)[number]>("中间件实例");
   const [instances, setInstances] = useState<MiddlewareInstance[]>([]);
   const [middlewareType, setMiddlewareType] = useState<"nacos" | "doris" | "mysql">("nacos");
@@ -1260,7 +1262,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
   return (
     <section className="space-y-5">
       <div className="flex flex-wrap gap-2 border-b border-white/10 pb-4">
-        {middlewareViews.map((view) => (
+        {middlewareViews.filter(view => view !== "数据库账号管理" || canManageDatabaseAccounts).map((view) => (
           <button
             className={`h-10 rounded-[6px] px-4 text-sm font-bold transition ${
               activeView === view
@@ -1276,6 +1278,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
         ))}
       </div>
 
+      {activeView === "数据库账号管理" && canManageDatabaseAccounts ? <DatabaseAccounts accessToken={accessToken} apiBaseUrl={apiBaseUrl} /> : null}
       {activeView === "中间件实例" ? (
         <form
           className="grid gap-4 rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur md:grid-cols-2 xl:grid-cols-4"
@@ -1455,7 +1458,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
         <p className="rounded-[6px] border border-[#4b5fc6]/60 bg-[#0a1ae1]/16 px-4 py-3 text-sm text-[#bfc9e7]">{notice}</p>
       ) : null}
 
-      <article className="rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur">
+      {activeView !== "数据库账号管理" ? <article className="rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur">
         <div className="mb-5">
           <h2 className="text-lg font-black text-white">{activeView}</h2>
           <p className="mt-2 text-sm text-[#bfc9e7]/58">{middlewareViewDescription(activeView)}</p>
@@ -1506,7 +1509,7 @@ function MiddlewareResourceManager({ accessToken }: { accessToken: string }) {
             </tbody>
           </table>
         </div>
-      </article>
+      </article> : null}
     </section>
   );
 }

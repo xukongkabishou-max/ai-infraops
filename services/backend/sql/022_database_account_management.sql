@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS database_managed_accounts (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  middleware_instance_id BIGINT UNSIGNED NOT NULL,
+  user_identity VARCHAR(255) NOT NULL,
+  instance_fingerprint CHAR(64) NOT NULL,
+  password_ciphertext BLOB NOT NULL,
+  password_nonce VARBINARY(12) NOT NULL,
+  source_identity VARCHAR(255) NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'recorded',
+  expires_at DATETIME(6) NULL,
+  expiry_claim_until DATETIME(6) NULL,
+  last_error VARCHAR(255) NULL,
+  updated_by BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  UNIQUE KEY uq_db_account (middleware_instance_id,user_identity),
+  KEY idx_db_account_expiry (status,expires_at,expiry_claim_until),
+  FOREIGN KEY (middleware_instance_id) REFERENCES middleware_instances(id),
+  FOREIGN KEY (updated_by) REFERENCES rbac_users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
