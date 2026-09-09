@@ -59,6 +59,7 @@ def system(monkeypatch):
     def execute(sql,params=None):
         if 'FROM rbac_users' in sql:return [{'id':1}] if state['user']==1 else []
         if 'FROM database_managed_accounts' in sql:return []
+        if 'FROM database_account_action_operations' in sql:return []
         rows=[dict(row) for row in db.execute(sql.replace('%s','?'),params or ())]
         for row in rows:
             if 'updated_at' in row:row['updated_at']=datetime.fromisoformat(row['updated_at'])
@@ -75,6 +76,9 @@ def system(monkeypatch):
     @contextmanager
     def connect(_):yield Connection()
     monkeypatch.setattr(remote,'connect',connect)
+    @contextmanager
+    def lock(*args):yield
+    monkeypatch.setattr(routes,'account_change_lock',lock)
     monkeypatch.setattr(remote,'capabilities',lambda *args:{'can_manage':True})
     monkeypatch.setattr(remote,'databases',lambda *args:['a','b','c'])
     monkeypatch.setattr(remote,'tables',lambda *args:['d','e','f'])

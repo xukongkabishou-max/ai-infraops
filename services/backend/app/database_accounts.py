@@ -255,12 +255,15 @@ def build_database_account_router(require_admin):
             if instance['middleware_type']=='doris':
                 populate_doris_expiries(source,page_rows,remote.query)
         kind = instance['middleware_type']
-        stored, legacy_rows = execute_queries([
+        stored, legacy_rows, action_rows = execute_queries([
             ('SELECT * FROM database_managed_accounts WHERE instance_fingerprint=%s',(remote.fingerprint(instance),)),
             (f'SELECT * FROM {kind}_account_credentials WHERE middleware_instance_id=%s',(instance_id,)),
+            ("SELECT user_identity,action FROM database_account_action_operations WHERE instance_fingerprint=%s AND status='succeeded' ORDER BY updated_at",
+             (remote.fingerprint(instance),)),
         ])
         records = {row['user_identity']:row for row in stored}
         legacy = {row['user_identity']:row for row in legacy_rows}
+        actions={row['user_identity']:row['action'] for row in action_rows}
         for account in page_rows:
             record = records.get(account['user_identity'])
             account.update(password=None,password_updated_at=None,expires_at=None,account_expires_at=None,status='existing')
@@ -281,6 +284,14 @@ def build_database_account_router(require_admin):
             elif same_identity(account['user_identity'],capability['current_user']):
                 account['password'] = decrypt_middleware_password(instance['password_ciphertext'],instance['password_nonce'])
                 account['status'] = 'instance_credential'
+            password_expiry=account.get('password_expiry',{})
+            native_disabled=account.get('locked') or (actions.get(account['user_identity'])=='disable'
+                and password_expiry.get('state')=='expired' and password_expiry.get('lifetime_seconds')==1)
+            if native_disabled:account['status']='disabled'
+            elif account['status']=='disabled':account['status']='existing'
+            if account['status']=='deleted':
+                account.update(status='recreated',password=None,password_updated_at=None,expires_at=None,account_expires_at=None,
+                    last_error='同名账号重新出现，旧账号密码不用于当前账号，请重新登记')
             for field in ('expires_at','account_expires_at','password_updated_at','native_expires_at'):
                 if isinstance(account.get(field),datetime): account[field] = account[field].replace(tzinfo=timezone.utc).isoformat()
         return {'items':page_rows,'total':len(accounts),'page':page,'capabilities':capability}
@@ -311,7 +322,7 @@ def build_database_account_router(require_admin):
                 binding_id = prior['middleware_instance_id'] if prior else instance_id
                 cipher,nonce = _encrypt_password(payload.password.get_secret_value(),aad(binding_id,payload.user_identity))
                 if prior:
-                    cursor.execute('UPDATE database_managed_accounts SET password_ciphertext=%s,password_nonce=%s,updated_by=%s WHERE id=%s',
+                    cursor.execute("UPDATE database_managed_accounts SET password_ciphertext=%s,password_nonce=%s,updated_by=%s,expires_at=CASE WHEN status='deleted' THEN NULL ELSE expires_at END,status=CASE WHEN status='deleted' THEN 'recorded' ELSE status END WHERE id=%s",
                         (cipher,nonce,session['user']['id'],prior['id']))
                 else:
                     cursor.execute('''INSERT INTO database_managed_accounts (middleware_instance_id,user_identity,instance_fingerprint,
@@ -409,4 +420,6 @@ def build_database_account_router(require_admin):
 
     from .database_permission_routes import install_permission_routes
     install_permission_routes(router,only_admin)
+    from .database_account_actions import install_action_routes
+    install_action_routes(router,only_admin)
     return router

@@ -236,10 +236,25 @@ def test_password_record_does_not_override_native_expiry(api,monkeypatch):
     cipher,nonce=management._encrypt_password('fixture',management.aad(1,"'reader'@'%'"))
     record={'user_identity':"'reader'@'%'",'middleware_instance_id':1,'instance_fingerprint':remote.fingerprint(instance),
         'status':'recorded','updated_at':management.now(),'expires_at':None,'last_error':None,'password_ciphertext':cipher,'password_nonce':nonce}
-    monkeypatch.setattr(management,'execute_queries',lambda statements:([record],[]))
+    monkeypatch.setattr(management,'execute_queries',lambda statements:([record],[],[]))
     result=client.get('/api/admin/database-accounts/1/accounts')
     assert result.status_code==200,result.text
     account=result.json()['items'][0]
     assert account['password_expiry']==expiry
     assert account['account_expires_at'] is None and account['expires_at'] is None
     assert account['password']=='fixture'
+
+
+def test_recreated_account_does_not_inherit_deleted_accounts_password_or_deadline(api,monkeypatch):
+    client,state=api
+    state['existing']=[{'username':'reader','host':'%','user_identity':"'reader'@'%'",'password_expiry':{'state':'never'}}]
+    instance={'middleware_type':'mysql','base_url':'mysql://fixture:3306','username':'root'}
+    cipher,nonce=management._encrypt_password('old-password',management.aad(1,"'reader'@'%'"))
+    record={'user_identity':"'reader'@'%'",'middleware_instance_id':1,'instance_fingerprint':remote.fingerprint(instance),
+        'status':'deleted','updated_at':management.now(),'expires_at':management.now(),'last_error':None,'password_ciphertext':cipher,'password_nonce':nonce}
+    monkeypatch.setattr(management,'execute_queries',lambda statements:([record],[],[]))
+    result=client.get('/api/admin/database-accounts/1/accounts');assert result.status_code==200
+    account=result.json()['items'][0]
+    assert account['status']=='recreated' and account['password'] is None
+    assert account['account_expires_at'] is None and account['expires_at'] is None
+    assert 'old-password' not in result.text

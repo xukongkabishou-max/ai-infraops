@@ -5,7 +5,9 @@ import pymysql
 
 
 def expiry_metadata(lifetime_seconds, created_epoch=None, server_epoch=None, forced_expired=False, source='unknown'):
-    result={'state':'unknown','expires_at':None,'lifetime_seconds':lifetime_seconds,'source':source}
+    result={'state':'unknown','expires_at':None,'lifetime_seconds':lifetime_seconds,'source':source,
+        'checked_at':datetime.fromtimestamp(float(server_epoch),timezone.utc).isoformat() if server_epoch is not None else None,
+        'password_changed_at':datetime.fromtimestamp(float(created_epoch),timezone.utc).isoformat() if created_epoch is not None and float(created_epoch)>0 else None}
     if lifetime_seconds is None or lifetime_seconds < 0:
         return {**result,'state':'expired' if forced_expired else 'unknown'}
     if lifetime_seconds == 0:

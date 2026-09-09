@@ -13,6 +13,7 @@ from . import database_account_client as remote
 from . import database_permissions as permissions
 from .audit import record_audit_event
 from .db import execute_query
+from .database_account_actions import account_change_lock
 
 
 def install_permission_routes(router, only_admin):
@@ -76,7 +77,7 @@ def install_permission_routes(router, only_admin):
         if row['status'] in ('applied','restored','conflict'):return result(row)
         if row['status']=='applying' and row['updated_at']>now()-timedelta(minutes=5):return result(row)
         instance=instance_for(row['middleware_instance_id'])
-        with remote.connect(instance) as source:
+        with account_change_lock(instance,row['user_identity']),remote.connect(instance) as source:
             current=permissions.snapshot(source,instance,row['user_identity'])
             check_incarnation(instance,current,row)
             if remote.canonical_grants(current['plans'])==remote.canonical_grants(decoded(row,'after_plan')) and not restore_before:
@@ -110,8 +111,11 @@ def install_permission_routes(router, only_admin):
             response.status_code=200 if prior['status'] in ('applied','restored','conflict') else 202
             return result(prior)
         instance=instance_for(instance_id);kind=instance['middleware_type']
-        with remote.connect(instance) as source:
+        with account_change_lock(instance,payload.user_identity),remote.connect(instance) as source:
             if not remote.capabilities(source,kind)['can_manage']:raise HTTPException(403,'实例管理账号缺少授权能力')
+            pending_actions=execute_query("SELECT operation_id FROM database_account_action_operations WHERE instance_fingerprint=%s AND user_identity=%s AND lock_key IS NOT NULL",
+                (remote.fingerprint(instance),payload.user_identity))
+            if pending_actions:raise HTTPException(409,'该账号有待核验的禁用或删除操作，请先查询原操作')
             state=permissions.snapshot(source,instance,payload.user_identity)
             if not state['editable']:raise HTTPException(422,state['message'])
             if not hmac.compare_digest(state['revision'],payload.revision):raise HTTPException(409,'当前权限已变更，请刷新后重新编辑')
