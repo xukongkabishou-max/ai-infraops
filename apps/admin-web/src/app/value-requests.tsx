@@ -33,11 +33,10 @@ function RecordFields({ items, className = "" }: { items: Array<[string, string 
 export function ValueRequestButton({ target, label, mutate, selectableLines }: { target: Record<string, unknown>; label: string; mutate: WriteApi; selectableLines?: NacosLine[] }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [lineNumber, setLineNumber] = useState("");
-  const [releaseTicket, setReleaseTicket] = useState("");
-  const [releaseVersion, setReleaseVersion] = useState("");
   const [submittedId, setSubmittedId] = useState<number | null>(null);
   const isNacos = target.category === "nacos";
-  const selection = selectableLines?.find(line => line.line_number === Number(lineNumber));
+  const validLineNumber = /^[1-9]\d*$/.test(lineNumber.trim());
+  const selection = validLineNumber ? selectableLines?.find(line => line.line_number === Number(lineNumber)) : undefined;
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -46,7 +45,7 @@ export function ValueRequestButton({ target, label, mutate, selectableLines }: {
     if (busy || (isNacos && !selection)) return;
     setBusy(true); setError("");
     try {
-      const body = { ...target, release_ticket: releaseTicket, release_version: releaseVersion, ...(isNacos ? { line_number: Number(lineNumber) } : {}) };
+      const body = { ...target, ...(isNacos ? { line_number: Number(lineNumber) } : {}) };
       const result = await mutate<{ id: number }>("/api/value-requests", "POST", body);
       setMessage(`申请 #${result.id} 已提交，待管理员审批`);
       setSubmittedId(result.id);
@@ -63,19 +62,12 @@ export function ValueRequestButton({ target, label, mutate, selectableLines }: {
         <h3 className="text-lg font-bold">申请查看 Value</h3>
         <p className="break-all text-sm text-[#c9d2f0]">{label}</p>
         {isNacos ? <div className="space-y-4">
-          <label className="block text-sm">结构行号 <span className="text-red-300">*</span>
-            <input required min={1} step={1} type="number" value={lineNumber} onChange={event => setLineNumber(event.target.value)} className="mt-2 h-11 w-full rounded-[6px] border border-white/20 bg-[#04050b] px-3" />
+          <label className="block text-sm">结构行号（单行） <span className="text-red-300">*</span>
+            <input required type="text" inputMode="numeric" maxLength={40} placeholder="例如：13（每次填写一个行号）" value={lineNumber} onChange={event => setLineNumber(event.target.value)} aria-invalid={Boolean(lineNumber && !selection)} className="mt-2 h-11 w-full rounded-[6px] border border-white/20 bg-[#04050b] px-3" />
           </label>
-          {selection ? <RecordFields items={[["对应配置路径", selection.config_path], ["原文行号", selection.source_line === selection.source_end_line ? selection.source_line : `${selection.source_line}–${selection.source_end_line}`]]} /> : lineNumber ? <p className="text-sm text-yellow-300">该行不对应独立配置值</p> : null}
+          {selection ? <RecordFields items={[["对应配置路径", selection.config_path], ["原文行号", selection.source_line === selection.source_end_line ? selection.source_line : `${selection.source_line}–${selection.source_end_line}`]]} /> : lineNumber ? <p role="alert" className="text-sm text-yellow-300">{validLineNumber ? "该行不对应独立配置值，请填写配置值所在的结构行号" : "请输入单个正整数行号，例如 13；暂不支持 1-13、1~13 或逗号分隔的多个行号"}</p> : null}
         </div> : null}
         <p className="text-sm">是否确认提交申请？</p>
-        <details className="text-sm text-[#c9d2f0]">
-          <summary className="cursor-pointer">关联上线单（选填）</summary>
-          <div className="mt-4 space-y-4">
-            <label className="block">上线单号<input maxLength={200} value={releaseTicket} onChange={event => setReleaseTicket(event.target.value)} className="mt-2 h-10 w-full rounded-[6px] border border-white/20 bg-[#04050b] px-3" /></label>
-            <label className="block">发布版本 / Commit ID<input maxLength={200} value={releaseVersion} onChange={event => setReleaseVersion(event.target.value)} className="mt-2 h-10 w-full rounded-[6px] border border-white/20 bg-[#04050b] px-3" /></label>
-          </div>
-        </details>
         {error ? <p role="alert" className="text-sm text-red-300">{error}</p> : null}
         <div className="flex justify-end gap-3"><button autoFocus type="button" className={control} onClick={() => dialog.current?.close()}>取消</button><button className={`${control} bg-[#0a1ae1]`} disabled={busy || (isNacos && !selection)}>{busy ? "提交中..." : "确认提交"}</button></div>
       </form>
