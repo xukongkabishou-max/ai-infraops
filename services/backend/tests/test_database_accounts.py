@@ -226,3 +226,20 @@ def test_external_connections_are_reused_and_capacity_is_bounded(monkeypatch):
         pool=next(iter(remote._pools.values()))[0]
         assert pool.size()==2 and pool._max_overflow==0
     finally:remote.dispose_pools()
+
+
+def test_password_record_does_not_override_native_expiry(api,monkeypatch):
+    client,state=api
+    expiry={'state':'scheduled','expires_at':'2026-09-16T03:16:03+00:00','lifetime_seconds':604800,'source':'mysql:user'}
+    state['existing']=[{'username':'reader','host':'%','user_identity':"'reader'@'%'",'password_expiry':expiry}]
+    instance={'middleware_type':'mysql','base_url':'mysql://fixture:3306','username':'root'}
+    cipher,nonce=management._encrypt_password('fixture',management.aad(1,"'reader'@'%'"))
+    record={'user_identity':"'reader'@'%'",'middleware_instance_id':1,'instance_fingerprint':remote.fingerprint(instance),
+        'status':'recorded','updated_at':management.now(),'expires_at':None,'last_error':None,'password_ciphertext':cipher,'password_nonce':nonce}
+    monkeypatch.setattr(management,'execute_queries',lambda statements:([record],[]))
+    result=client.get('/api/admin/database-accounts/1/accounts')
+    assert result.status_code==200,result.text
+    account=result.json()['items'][0]
+    assert account['password_expiry']==expiry
+    assert account['account_expires_at'] is None and account['expires_at'] is None
+    assert account['password']=='fixture'

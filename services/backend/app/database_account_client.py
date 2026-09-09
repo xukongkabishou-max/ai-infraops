@@ -19,6 +19,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeout
 from .middleware_crypto import decrypt_middleware_password
 from .mysql_client import _parse_user_identity, _map_account_row as mysql_account
 from .doris_client import _map_account_row as doris_account
+from .database_account_expiry import mysql_expiry
 
 
 class AccountError(ValueError):
@@ -110,14 +111,14 @@ def query(connection, sql, params=None):
 def accounts(connection, kind):
     if kind == 'mysql':
         rows = query(connection, '''SELECT User,Host,plugin,account_locked,password_expired,
-            password_last_changed,password_lifetime,@@default_password_lifetime AS default_lifetime
+            password_lifetime,@@global.default_password_lifetime AS default_lifetime,
+            UNIX_TIMESTAMP(password_last_changed) AS password_changed_epoch,UNIX_TIMESTAMP() AS server_epoch
             FROM mysql.user ORDER BY User,Host''')
-        from datetime import timedelta
         results = []
         for row in rows:
             item = mysql_account(row)
-            lifetime = row['password_lifetime'] if row['password_lifetime'] is not None else row['default_lifetime']
-            item['native_expires_at'] = row['password_last_changed'] + timedelta(days=int(lifetime)) if lifetime and row['password_last_changed'] else None
+            item['password_expiry']=mysql_expiry(row)
+            item['native_expires_at']=item['password_expiry']['expires_at']
             item['locked'] = row['account_locked'] == 'Y'
             results.append(item)
         return results

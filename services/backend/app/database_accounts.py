@@ -15,6 +15,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from . import database_account_client as remote
+from .database_account_expiry import populate_doris_expiries
 from .audit import mark_permission, record_audit_event
 from .db import execute_query, execute_queries, get_connection
 from .middleware_crypto import _encrypt_password, _decrypt_password, _encryption_key, decrypt_mysql_account_password, decrypt_doris_account_password, decrypt_middleware_password
@@ -249,6 +250,10 @@ def build_database_account_router(require_admin):
         with remote.connect(instance) as source:
             accounts = remote.accounts(source,instance['middleware_type'])
             capability = remote.capabilities(source,instance['middleware_type'])
+            accounts = [row for row in accounts if keyword.lower() in (row['username']+'@'+row['host']).lower()]
+            page_rows = accounts[(page-1)*20:page*20]
+            if instance['middleware_type']=='doris':
+                populate_doris_expiries(source,page_rows,remote.query)
         kind = instance['middleware_type']
         stored, legacy_rows = execute_queries([
             ('SELECT * FROM database_managed_accounts WHERE instance_fingerprint=%s',(remote.fingerprint(instance),)),
@@ -256,13 +261,12 @@ def build_database_account_router(require_admin):
         ])
         records = {row['user_identity']:row for row in stored}
         legacy = {row['user_identity']:row for row in legacy_rows}
-        accounts = [row for row in accounts if keyword.lower() in (row['username']+'@'+row['host']).lower()]
-        page_rows = accounts[(page-1)*20:page*20]
         for account in page_rows:
             record = records.get(account['user_identity'])
-            account.update(password=None, password_updated_at=None, expires_at=account.get('native_expires_at'), status='existing')
+            account.update(password=None,password_updated_at=None,expires_at=None,account_expires_at=None,status='existing')
             if record:
-                account.update(status=record['status'],password_updated_at=record['updated_at'],expires_at=record['expires_at'],last_error=record['last_error'])
+                account.update(status=record['status'],password_updated_at=record['updated_at'],expires_at=record['expires_at'],
+                    account_expires_at=record['expires_at'],last_error=record['last_error'])
                 if record['instance_fingerprint'] == remote.fingerprint(instance):
                     try: account['password'] = _decrypt_password(record['password_ciphertext'],record['password_nonce'],aad(record['middleware_instance_id'],account['user_identity']))
                     except Exception: account['last_error'] = '历史密码无法解密，待手动添加'
@@ -277,7 +281,7 @@ def build_database_account_router(require_admin):
             elif same_identity(account['user_identity'],capability['current_user']):
                 account['password'] = decrypt_middleware_password(instance['password_ciphertext'],instance['password_nonce'])
                 account['status'] = 'instance_credential'
-            for field in ('expires_at','password_updated_at','native_expires_at'):
+            for field in ('expires_at','account_expires_at','password_updated_at','native_expires_at'):
                 if isinstance(account.get(field),datetime): account[field] = account[field].replace(tzinfo=timezone.utc).isoformat()
         return {'items':page_rows,'total':len(accounts),'page':page,'capabilities':capability}
 

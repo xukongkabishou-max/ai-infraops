@@ -38,7 +38,9 @@
 
 MySQL 使用 ACCOUNT LOCK 阻止新登录。Doris 2.1 无显式 ACCOUNT_LOCK，使用销毁的随机新凭证使原密码失效，保留账号及历史密码；不会删除用户或业务数据。已建立的数据库会话不会被主动终止。处理失败会记录错误并重试。平台停止时由数据库原生密码期限提供到期限制，平台恢复后继续处理待到期记录。
 
-未托管账号没有平台到期记录时显示永久；MySQL 另外读取原生密码期限。Doris 2.1 不支持 SHOW CREATE USER，界面不声称已读取其完整原生密码策略。
+密码期限以原生数据库策略为准，绝不把缺失的托管记录当成永久。MySQL 使用 password_last_changed 的数据库时间戳，加 password_lifetime（空值继承 global.default_password_lifetime）计算；password_expired 标记优先表示已过期。Doris 2.1 通过 `SHOW PROC '/auth/<user@host>'` 获取 expiration_seconds 和 password_creation_time，DEFAULT 使用全局天数，NEVER 才表示永不过期；格式化起算时间由同一连接的 UNIX_TIMESTAMP 转回 UTC。仅查询当前页最多 20 个账号，并一次批量转换时间。
+
+页面和导出分别提供“密码到期时间”“平台停用时间”；当前页没有平台停用计划时隐藏后一列。来源接口不支持、读取失败或缺少起算时间时显示未知，不能显示永久。密码到期不意味着账号被删除；记录的密码只代表最后登记值，不能证明仍可登录。
 
 ## 性能与存储
 
