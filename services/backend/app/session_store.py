@@ -4,6 +4,7 @@ from functools import lru_cache
 import redis
 
 from .config import settings
+from .db import execute_query
 
 
 @lru_cache(maxsize=1)
@@ -38,8 +39,15 @@ def load_session(client_type: str, token: str) -> dict | None:
     raw_payload = client.get(session_key(client_type, token))
     if not raw_payload:
         return None
+    payload = json.loads(raw_payload)
+    users = execute_query("SELECT auth_version,is_active,is_superuser FROM rbac_users WHERE id=%s",
+                          (payload.get("user", {}).get("id"),))
+    if not users or not users[0]["is_active"] or payload.get("_auth_version", 0) != users[0]["auth_version"]:
+        client.delete(session_key(client_type, token))
+        return None
+    payload["user"]["isSuperuser"] = bool(users[0]["is_superuser"])
     client.expire(session_key(client_type, token), settings.session_ttl_seconds)
-    return json.loads(raw_payload)
+    return payload
 
 
 def delete_session(client_type: str, token: str) -> None:

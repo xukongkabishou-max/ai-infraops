@@ -87,6 +87,7 @@ from .schemas import (
 )
 from .session_store import delete_session, load_session, save_session
 from .value_access import build_value_access_router
+from .user_passwords import build_user_password_router
 
 password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 log_file = configure_logging()
@@ -195,7 +196,7 @@ def login(payload: LoginRequest, request: Request) -> LoginResponse:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id, username, display_name, email, password_hash, is_active, is_superuser
+                SELECT id, username, display_name, email, password_hash, is_active, is_superuser, auth_version
                 FROM rbac_users
                 WHERE username = %s
                 LIMIT 1
@@ -323,7 +324,7 @@ def login(payload: LoginRequest, request: Request) -> LoginResponse:
         permissions=permission_codes,
         menus=menus,
     )
-    save_session(payload.client_type, access_token, response.model_dump())
+    save_session(payload.client_type, access_token, {**response.model_dump(), "_auth_version": user["auth_version"]})
     session_payload = response.model_dump()
     attach_audit_session(request, session_payload, payload.client_type)
     if payload.client_type == "backend_admin_web":
@@ -365,7 +366,9 @@ def list_users(
     require_permission(admin_session, "user:list")
     return execute_query(
         """
-        SELECT id, username, display_name, email, is_active, is_superuser, last_login_at
+        SELECT id, username, display_name, email, is_active, is_superuser, last_login_at,
+               (password_ciphertext IS NOT NULL AND password_nonce IS NOT NULL) AS has_stored_password,
+               password_changed_at
         FROM rbac_users
         ORDER BY id
         """
@@ -3130,3 +3133,4 @@ app.include_router(build_value_access_router(
     require_user_web_session, require_backend_admin_session,
     get_k8s_cluster_by_host, _require_allowed_namespace,
 ))
+app.include_router(build_user_password_router(require_backend_admin_session, password_context))

@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ValueApprovals } from "./value-approvals";
+import { UserManagement } from "./user-management";
 
 type ApiUser = {
   id: number;
@@ -10,6 +11,7 @@ type ApiUser = {
   display_name?: string;
   email?: string;
   is_active?: boolean;
+  isSuperuser?: boolean;
   last_login_at?: string | null;
 };
 
@@ -578,7 +580,9 @@ export default function BackendAdminHome() {
             <div>
               <p className="text-sm font-semibold text-[#4b5fc6]">{activeNav}</p>
               <h1 className="mt-1 text-2xl font-black tracking-normal text-white">
-                {activeNav === "机器资源信息"
+                {activeNav === "用户管理"
+                  ? "用户账号与密码管理"
+                  : activeNav === "机器资源信息"
                   ? "添加、删除与检查环境主机"
                   : activeNav === "中间件资源信息"
                     ? "维护中间件实例、账号与权限"
@@ -606,7 +610,12 @@ export default function BackendAdminHome() {
           </header>
 
           <div className="space-y-6 px-6 py-6 lg:px-8">
-            {activeNav === "机器资源信息" ? (
+            {activeNav === "用户管理" ? (
+              <UserManagement key={session.access_token} accessToken={session.access_token} apiBaseUrl={apiBaseUrl}
+                currentUserId={session.user.id} canResetPasswords={Boolean(session.user.isSuperuser)}
+                canViewPasswords={session.user.username === "admin" && Boolean(session.user.isSuperuser)}
+                onOwnPasswordChanged={() => { handleLogout(); setError("密码已修改，请使用新密码重新登录"); }} />
+            ) : activeNav === "机器资源信息" ? (
               <MachineHostManager
                 environmentName={environmentName}
                 editingHostId={editingHostId}
