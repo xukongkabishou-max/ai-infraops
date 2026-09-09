@@ -10,7 +10,8 @@ from .k8s_client import get_workload_environment_keys
 from .middleware_crypto import _encrypt_password, _decrypt_password, decrypt_middleware_password
 from .nacos_client import fetch_nacos_config_content
 from .nacos_config_redactor import NacosConfigParseError
-from .nacos_value_selection import parse_config_document, selection_scope, verify_selection
+from .nacos_value_selection import (parse_config_document, selection_scope, verify_selection,
+    parse_line_ranges, selection_metadata, verify_selections)
 
 
 class ValueRequest(BaseModel):
@@ -30,6 +31,7 @@ class ValueRequest(BaseModel):
     group: str = Field(default="", max_length=255)
     data_id: str = Field(default="", max_length=255)
     line_number: int | None = Field(default=None, ge=1, le=40000, strict=True)
+    line_ranges: str | None = Field(default=None, min_length=1, max_length=2000)
     config_type: Literal["yaml", "yml", "json"] | None = None
     config_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
@@ -42,12 +44,16 @@ class ValueRequest(BaseModel):
                 raise ValueError("Key 格式无效")
         elif not all((self.instance_id, self.group, self.data_id)):
             raise ValueError("请选择 Nacos 实例、Group 和配置")
-        elif self.category == "nacos" and not all((self.line_number, self.config_type, self.config_revision)):
+        elif not all((self.line_number or self.line_ranges, self.config_type, self.config_revision)):
             raise ValueError("Nacos 申请必须填写结构行号，并携带当前配置版本")
+        if self.category == "nacos" and self.line_ranges is not None:
+            if self.line_number is not None:
+                raise ValueError("不能同时提交单行号与行号区间")
+            parse_line_ranges(self.line_ranges)
         return self
 
     def target(self):
-        fields = ("host_id", "namespace", "kind", "workload", "container", "key") if self.category == "environment" else ("instance_id", "namespace_id", "group", "data_id", "line_number", "config_type", "config_revision")
+        fields = ("host_id", "namespace", "kind", "workload", "container", "key") if self.category == "environment" else ("instance_id", "namespace_id", "group", "data_id", "line_ranges" if self.line_ranges is not None else "line_number", "config_type", "config_revision")
         return self.model_dump(include=set(fields))
 
 
@@ -117,6 +123,11 @@ def metadata(row):
 
 
 def is_scoped_target(target):
+    if target.get("scope_version") == 2:
+        return bool(target.get("line_ranges") and target.get("config_revision") and target.get("config_type")
+            and isinstance(target.get("selections"), list) and target["selections"]
+            and all(isinstance(item, dict) and all(key in item for key in (
+                "line_number", "config_path", "source_line", "source_end_line")) for item in target["selections"]))
     return target.get("scope_version") == 1 and all(key in target for key in (
         "line_number", "config_path", "source_line", "source_end_line", "config_revision", "config_type"))
 
@@ -179,11 +190,15 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
         if payload.category == "nacos":
             document = load_document(source, target)
             try:
-                selected = verify_selection(document, target)
+                if payload.line_ranges is not None:
+                    target["selections"] = selection_metadata(verify_selections(document, target))
+                    target["scope_version"] = 2
+                else:
+                    selected = verify_selection(document, target)
+                    target.update({key: selected[key] for key in ("config_path", "source_line", "source_end_line")})
+                    target["scope_version"] = 1
             except NacosConfigParseError as exc:
                 raise HTTPException(409, str(exc)) from None
-            target.update({key: selected[key] for key in ("config_path", "source_line", "source_end_line")})
-            target["scope_version"] = 1
         connection = get_connection()
         try:
             with connection.cursor() as cursor:
@@ -324,10 +339,13 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
                 else:
                     document = load_document(source, target)
                     try:
-                        selected = verify_selection(document, target)
+                        if target["scope_version"] == 2:
+                            snapshot = {**target, "values": verify_selections(document, target)}
+                        else:
+                            selected = verify_selection(document, target)
+                            snapshot = {**target, "value": selected["value"]}
                     except NacosConfigParseError as exc:
                         raise HTTPException(409, str(exc)) from None
-                    snapshot = {**target, "value": selected["value"]}
                 captured_at = now_utc()
                 encoded = json.dumps(snapshot, ensure_ascii=False)
                 if len(encoded.encode()) > 2 * 1024 * 1024:
@@ -399,9 +417,18 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
             raise HTTPException(503, "快照暂时无法读取") from None
         if row["category"] == "nacos":
             binding = ("scope_version", "instance_id", "namespace_id", "group", "data_id", "line_number",
-                       "config_path", "source_line", "source_end_line", "config_type", "config_revision")
+                       "config_path", "source_line", "source_end_line", "config_type", "config_revision", "line_ranges", "selections")
             if any(snapshot.get(key) != target.get(key) for key in binding):
                 raise HTTPException(410, "快照授权范围不匹配，请重新申请")
+            if target["scope_version"] == 2:
+                try:
+                    if "value" in snapshot or selection_metadata(snapshot["values"]) != target["selections"]:
+                        raise ValueError("scope mismatch")
+                    # Return only the bound entries, never extra fields from a malformed snapshot.
+                    snapshot = {**target, "values": [{**meta, "value": item["value"]}
+                        for meta, item in zip(target["selections"], snapshot["values"], strict=True)]}
+                except (KeyError, TypeError, ValueError):
+                    raise HTTPException(410, "快照授权范围不匹配，请重新申请") from None
         return {"snapshot": snapshot, "captured_at": row["captured_at"].replace(tzinfo=timezone.utc).isoformat(),
                 "historical": True,
                 "server_now": now_utc().replace(tzinfo=timezone.utc).isoformat(),

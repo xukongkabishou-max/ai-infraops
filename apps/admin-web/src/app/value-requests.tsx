@@ -2,6 +2,7 @@
 
 import { Fragment, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApprovalLink } from "./approval-link";
+import { parseLineRanges } from "./nacos-line-ranges";
 
 type Category = "environment" | "nacos";
 export type NacosLine = { line_number: number; config_path: string; source_line: number; source_end_line: number };
@@ -9,13 +10,13 @@ type ReadApi = <T>(path: string, signal?: AbortSignal) => Promise<T>;
 type WriteApi = <T>(path: string, method: "POST" | "PUT", body: Record<string, unknown>) => Promise<T>;
 type RequestRecord = {
   id: number; category: Category; environment_name: string; resource_name: string;
-  target: Record<string, string | number>; reason: string; status: string;
+  target: Record<string, string | number> & { selections?: NacosLine[] }; reason: string; status: string;
   created_at: string; reviewed_at: string | null; captured_at: string | null;
   expires_at: string | null; reviewer_name: string | null; review_note: string;
   requester_name: string; release_ticket?: string; release_version?: string;
   can_review?: boolean; can_view_value?: boolean;
 };
-type Snapshot = { snapshot: { value: string; pod_name?: string; container_name?: string; key?: string }; captured_at: string; expires_at: string; server_now: string };
+type Snapshot = { snapshot: { value?: string; values?: Array<NacosLine & { value: string }>; pod_name?: string; container_name?: string; key?: string }; captured_at: string; expires_at: string; server_now: string };
 const control = "min-h-9 rounded-[6px] border border-[#4b5fc6] px-3 py-2 text-xs font-bold text-[#c9d2f0] disabled:opacity-40";
 const statusLabels: Record<string, string> = { pending: "待审批", approved: "已通过", rejected: "已拒绝", expired: "已过期", invalidated: "已失效，请重新申请" };
 const errorMessage = (error: unknown, fallback: string) => error instanceof SyntaxError ? "审批服务暂时不可用，请稍后刷新重试" : error instanceof Error ? error.message : fallback;
@@ -30,22 +31,29 @@ function RecordFields({ items, className = "" }: { items: Array<[string, string 
   </dl>;
 }
 
-export function ValueRequestButton({ target, label, mutate, selectableLines }: { target: Record<string, unknown>; label: string; mutate: WriteApi; selectableLines?: NacosLine[] }) {
+export function ValueRequestButton({ target, label, mutate, selectableLines, lineCount = 0 }: { target: Record<string, unknown>; label: string; mutate: WriteApi; selectableLines?: NacosLine[]; lineCount?: number }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [lineNumber, setLineNumber] = useState("");
   const [submittedId, setSubmittedId] = useState<number | null>(null);
   const isNacos = target.category === "nacos";
-  const validLineNumber = /^[1-9]\d*$/.test(lineNumber.trim());
-  const selection = validLineNumber ? selectableLines?.find(line => line.line_number === Number(lineNumber)) : undefined;
+  let selectedLines: NacosLine[] = [];
+  let selectionError = "";
+  if (isNacos && lineNumber.trim()) {
+    try {
+      const numbers = new Set(parseLineRanges(lineNumber, lineCount));
+      selectedLines = (selectableLines ?? []).filter(line => numbers.has(line.line_number));
+      if (!selectedLines.length) selectionError = "所选行号不包含独立配置值";
+    } catch (e) { selectionError = errorMessage(e, "行号格式错误"); }
+  }
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (busy || (isNacos && !selection)) return;
+    if (busy || (isNacos && (!selectedLines.length || selectionError))) return;
     setBusy(true); setError("");
     try {
-      const body = { ...target, ...(isNacos ? { line_number: Number(lineNumber) } : {}) };
+      const body = { ...target, ...(isNacos ? { line_ranges: lineNumber.trim() } : {}) };
       const result = await mutate<{ id: number }>("/api/value-requests", "POST", body);
       setMessage(`申请 #${result.id} 已提交，待管理员审批`);
       setSubmittedId(result.id);
@@ -57,19 +65,23 @@ export function ValueRequestButton({ target, label, mutate, selectableLines }: {
     <button type="button" className={control} onClick={() => { setError(""); setLineNumber(""); dialog.current?.showModal(); }}>查看具体 Value</button>
     {message ? <span role="status" className="text-xs text-emerald-300">{message}</span> : null}
     {submittedId ? <ApprovalLink requestId={submittedId} /> : null}
-    <dialog ref={dialog} className="m-auto w-[min(560px,calc(100vw-32px))] rounded-[6px] border border-[#4b5fc6] bg-[#070b1b] p-6 text-white backdrop:bg-black/70">
+    <dialog ref={dialog} className="m-auto max-h-[90dvh] w-[min(640px,calc(100vw-32px))] overflow-y-auto rounded-[6px] border border-[#4b5fc6] bg-[#070b1b] p-4 text-white backdrop:bg-black/70 sm:p-6">
       <form onSubmit={submit} className="space-y-4">
         <h3 className="text-lg font-bold">申请查看 Value</h3>
         <p className="break-all text-sm text-[#c9d2f0]">{label}</p>
         {isNacos ? <div className="space-y-4">
-          <label className="block text-sm">结构行号（单行） <span className="text-red-300">*</span>
-            <input required type="text" inputMode="numeric" maxLength={40} placeholder="例如：13（每次填写一个行号）" value={lineNumber} onChange={event => setLineNumber(event.target.value)} aria-invalid={Boolean(lineNumber && !selection)} className="mt-2 h-11 w-full rounded-[6px] border border-white/20 bg-[#04050b] px-3" />
+          <label className="block text-sm">页面结构行号 <span className="text-red-300">*</span>
+            <textarea required rows={2} maxLength={2000} placeholder="多配置及多行配置获取示例：18-26，36-57" value={lineNumber} onChange={event => setLineNumber(event.target.value)} aria-invalid={Boolean(selectionError)} className="mt-2 min-h-20 w-full resize-y rounded-[6px] border border-white/20 bg-[#04050b] px-3 py-2 leading-6" />
           </label>
-          {selection ? <RecordFields items={[["对应配置路径", selection.config_path], ["原文行号", selection.source_line === selection.source_end_line ? selection.source_line : `${selection.source_line}–${selection.source_end_line}`]]} /> : lineNumber ? <p role="alert" className="text-sm text-yellow-300">{validLineNumber ? "该行不对应独立配置值，请填写配置值所在的结构行号" : "请输入单个正整数行号，例如 13；暂不支持 1-13、1~13 或逗号分隔的多个行号"}</p> : null}
+          <p className="text-xs leading-5 text-[#c9d2f0]">按页面左侧行号填写，区间用 -，多个区间用中文或英文逗号分隔；也可填写单行，例如 18-26，36，40-57。</p>
+          {selectionError ? <p role="alert" className="text-sm text-yellow-300">{selectionError}</p> : selectedLines.length ? <div className="space-y-2">
+            <p className="text-sm text-emerald-300">将申请 {selectedLines.length} 个配置值（跳过无独立值的结构行）</p>
+            <div className="max-h-40 overflow-auto border-y border-white/10"><table className="w-full text-left text-xs"><thead><tr><th className="p-2">页面行号</th><th className="p-2">配置路径</th><th className="p-2">原文行号</th></tr></thead><tbody>{selectedLines.map(line => <tr key={line.line_number}><td className="p-2">{line.line_number}</td><td className="break-all p-2">{line.config_path}</td><td className="whitespace-nowrap p-2">{line.source_line === line.source_end_line ? line.source_line : `${line.source_line}-${line.source_end_line}`}</td></tr>)}</tbody></table></div>
+          </div> : null}
         </div> : null}
         <p className="text-sm">是否确认提交申请？</p>
         {error ? <p role="alert" className="text-sm text-red-300">{error}</p> : null}
-        <div className="flex justify-end gap-3"><button autoFocus type="button" className={control} onClick={() => dialog.current?.close()}>取消</button><button className={`${control} bg-[#0a1ae1]`} disabled={busy || (isNacos && !selection)}>{busy ? "提交中..." : "确认提交"}</button></div>
+        <div className="flex justify-end gap-3"><button autoFocus type="button" className={control} onClick={() => dialog.current?.close()}>取消</button><button className={`${control} bg-[#0a1ae1]`} disabled={busy || (isNacos && (!selectedLines.length || Boolean(selectionError)))}>{busy ? "提交中..." : "确认提交"}</button></div>
       </form>
     </dialog>
   </div>;
@@ -177,7 +189,9 @@ export function UserValueRequests({ category, read, requestId, mutate }: { categ
             ...(row.category === "environment" ? [["工作负载", `${row.target.kind} / ${row.target.workload}`], ["容器", row.target.container]] as Array<[string, string | number]> : [["Group", row.target.group]] as Array<[string, string | number]>),
             ["审批人", row.reviewer_name],
             ...(row.category === "nacos" && row.target.line_number ? [["结构行号", row.target.line_number], ["配置路径", row.target.config_path], ["原文行号", row.target.source_line === row.target.source_end_line ? row.target.source_line : `${row.target.source_line}-${row.target.source_end_line}`]] as Array<[string, string | number]> : []),
+            ...(row.target.line_ranges ? [["申请页面行号", row.target.line_ranges], ["配置值数量", row.target.selections?.length]] as Array<[string, string | number | undefined]> : []),
           ]} />
+          {row.target.selections?.length ? <details className="text-sm text-[#c9d2f0]"><summary className="cursor-pointer">申请配置明细（{row.target.selections.length} 项）</summary><ul className="mt-2 max-h-48 overflow-auto divide-y divide-white/10">{row.target.selections.map(item => <li key={item.line_number} className="break-all py-2 text-xs leading-5">页面第 {item.line_number} 行 · {item.config_path} · 原文 {item.source_line}-{item.source_end_line} 行</li>)}</ul></details> : null}
           {row.release_ticket || row.release_version ? <RecordFields items={[["上线单号", row.release_ticket], ["发布版本 / Commit ID", row.release_version]]} /> : null}
           <div className="border-y border-white/10 bg-white/[0.025] px-4 py-5 sm:px-5">
             <RecordFields className="xl:grid-cols-4" items={[["申请时间", time(row.created_at)], ["审批时间", time(row.reviewed_at)], ["数值采集时间", time(row.captured_at)], ["原授权截止时间", time(row.expires_at)]]} />
@@ -196,7 +210,7 @@ export function UserValueRequests({ category, read, requestId, mutate }: { categ
               ["快照采集时间", time(snapshot.captured_at)],
               ...(snapshot.snapshot.pod_name ? [["来源 Pod", snapshot.snapshot.pod_name], ["来源容器", snapshot.snapshot.container_name]] as Array<[string, string | undefined]> : []),
             ]} />
-            <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words bg-[#04050b] px-5 py-4 font-mono text-sm leading-7 text-[#e0f2e9] [overflow-wrap:anywhere]">{snapshot.snapshot.value === "" ? "（空字符串）" : snapshot.snapshot.value}</pre>
+            <div className="max-h-[520px] overflow-auto">{snapshot.snapshot.values ? snapshot.snapshot.values.map(item => <div key={item.line_number} className="border-b border-white/10 py-3"><p className="mb-2 break-all text-xs text-[#c9d2f0]">页面第 {item.line_number} 行 · {item.config_path} · 原文 {item.source_line}-{item.source_end_line} 行</p><pre className="whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{item.value === "" ? "（空字符串）" : item.value}</pre></div>) : <pre className="whitespace-pre-wrap break-words bg-[#04050b] px-5 py-4 font-mono text-sm leading-7 text-[#e0f2e9] [overflow-wrap:anywhere]">{snapshot.snapshot.value === "" ? "（空字符串）" : snapshot.snapshot.value}</pre>}</div>
           </div> : null}
         </article></td></tr> : null}</Fragment>;
       })}

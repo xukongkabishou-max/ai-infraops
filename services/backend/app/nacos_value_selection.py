@@ -13,6 +13,43 @@ from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 from .middleware_crypto import _encryption_key
 from .nacos_config_redactor import MAX_CONFIG_CONTENT_BYTES, NacosConfigParseError
 
+SELECTION_FIELDS = ("line_number", "config_path", "source_line", "source_end_line")
+
+
+def parse_line_ranges(expression: str) -> list[int]:
+    numbers = set()
+    if len(expression) > 2000:
+        raise NacosConfigParseError("行号输入过长")
+    for part in expression.replace("，", ",").split(","):
+        match = re.fullmatch(r"\s*([1-9][0-9]{0,4})\s*(?:-\s*([1-9][0-9]{0,4})\s*)?", part)
+        if not match:
+            raise NacosConfigParseError("行号格式错误，例如 18-26，36-57；区间用 -，多个区间用逗号分隔")
+        start = int(match[1])
+        end = int(match[2] or match[1])
+        if start > end or end > 40000:
+            raise NacosConfigParseError("行号须在 1 至 40000 之间，区间起始行不能大于结束行")
+        numbers.update(range(start, end + 1))
+    return sorted(numbers)
+
+
+def selection_metadata(selected: list[dict]) -> list[dict]:
+    return [{key: item[key] for key in SELECTION_FIELDS} for item in selected]
+
+
+def verify_selections(document, target):
+    if not hmac.compare_digest(document.revision, target["config_revision"]):
+        raise NacosConfigParseError("配置已变更，请重新获取带行号的结构并提交申请")
+    numbers = parse_line_ranges(target["line_ranges"])
+    if numbers[-1] > len(document.structure.splitlines()):
+        raise NacosConfigParseError("行号超出当前页面结构配置的范围")
+    # Collection headers are not grants to their descendants; only explicit scalar rows qualify.
+    selected = [document.selections[number] for number in numbers if number in document.selections]
+    if not selected:
+        raise NacosConfigParseError("所选行号不包含独立配置值，请选择配置值所在的结构行号")
+    if "selections" in target and selection_metadata(selected) != target["selections"]:
+        raise NacosConfigParseError("配置行号与路径不匹配，请重新申请")
+    return selected
+
 
 def selection_scope(instance_id, namespace_id, group, data_id, config_type):
     return [instance_id, namespace_id or "public", group, data_id, "json" if config_type.strip().lower() == "json" else "yaml"]

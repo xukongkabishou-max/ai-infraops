@@ -2787,7 +2787,7 @@ function MiddlewareSystemView({
                                               </div>
                                               <div className="flex items-center gap-3">
                                                 <span className="text-xs font-bold text-[#7dd3fc]">{nacosStructure.key_count} 个 Key</span>
-                                                <ValueRequestButton key={nacosStructure.config_revision} target={{ category: "nacos", instance_id: nacosStructure.instance.id, namespace_id: nacosStructure.namespace_id, group: nacosStructure.group, data_id: nacosStructure.data_id, config_type: nacosStructure.format, config_revision: nacosStructure.config_revision }} selectableLines={nacosStructure.selectable_lines} label={`${nacosStructure.namespace_id || "public"} / ${nacosStructure.group} / ${nacosStructure.data_id}`} mutate={mutateUserApi} />
+                                                <ValueRequestButton key={nacosStructure.config_revision} target={{ category: "nacos", instance_id: nacosStructure.instance.id, namespace_id: nacosStructure.namespace_id, group: nacosStructure.group, data_id: nacosStructure.data_id, config_type: nacosStructure.format, config_revision: nacosStructure.config_revision }} selectableLines={nacosStructure.selectable_lines} lineCount={nacosStructure.line_count} label={`${nacosStructure.namespace_id || "public"} / ${nacosStructure.group} / ${nacosStructure.data_id}`} mutate={mutateUserApi} />
                                                 <button
                                                   className="h-8 rounded-[6px] border border-[#29356f] px-3 text-xs font-bold text-[#9fb0ff] hover:border-[#4b5fc6] hover:text-white"
                                                   onClick={clearNacosStructure}

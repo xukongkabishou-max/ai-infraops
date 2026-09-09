@@ -105,3 +105,41 @@ def test_default_namespace_aliases_use_the_same_revision_scope():
     public_scope = selection.selection_scope(1, "public", "group", "app", "yml")
     assert empty_scope == public_scope
     assert selection.parse_config_document('key: secret', 'yaml', empty_scope).revision == selection.parse_config_document('key: secret', 'yml', public_scope).revision
+
+
+def test_range_parser_accepts_chinese_commas_mixed_rows_and_deduplicates():
+    assert selection.parse_line_ranges("18-26，36-57") == list(range(18,27)) + list(range(36,58))
+    assert selection.parse_line_ranges(" 2-4, 3，7, 9 - 10 ") == [2,3,4,7,9,10]
+
+
+@pytest.mark.parametrize("expression", ["", "1~13", "1;13", "1,,13", "13,", "0", "-1", "1.5", "1e3", "26-18", "40001", "1-999999999", "١"])
+def test_range_parser_rejects_ambiguous_or_unbounded_input(expression):
+    with pytest.raises(NacosConfigParseError):
+        selection.parse_line_ranges(expression)
+
+
+@pytest.mark.parametrize("source,kind,expression,expected", [
+    ('# hidden comment\r\n\r\nroot:\r\n  a: first\r\n\r\n  block: |\r\n    second\r\n    third\r\n  omitted: private\r\n  last: last\r\n', 'yaml', '1-3，5', [(2,'/root/a',4,4,'first'),(3,'/root/block',6,8,'second\nthird\n'),(5,'/root/last',10,10,'last')]),
+    ('{"root":{"a":"first","b":"private"},"list":["last"]}', 'json', '1-3，7-9', [(3,'/root/a',1,1,'first'),(7,'/list/0',1,1,'last')]),
+])
+def test_ranges_bind_display_path_and_original_marks_without_neighbor_values(source, kind, expression, expected):
+    document = parse(source, kind)
+    target = {"line_ranges":expression,"config_revision":document.revision}
+    items = selection.verify_selections(document, target)
+    assert [tuple(item[key] for key in (*selection.SELECTION_FIELDS, 'value')) for item in items] == expected
+    assert 'private' not in json.dumps(items)
+    target['selections'] = selection.selection_metadata(items)
+    assert selection.verify_selections(document, target) == items
+    target['selections'][0]['source_line'] += 1
+    with pytest.raises(NacosConfigParseError): selection.verify_selections(document, target)
+
+
+def test_collection_header_does_not_grant_descendants_and_out_of_bounds_fails():
+    document = parse('root:\n  a: secret\n  b: hidden\n')
+    for expression in ('1', '1-4'):
+        with pytest.raises(NacosConfigParseError):
+            selection.verify_selections(document, {'line_ranges':expression,'config_revision':document.revision})
+    target = {'line_ranges':'1-2','config_revision':document.revision}
+    assert [item['value'] for item in selection.verify_selections(document,target)] == ['secret']
+    with pytest.raises(NacosConfigParseError):
+        selection.verify_selections(parse('# new comment\nroot:\n  a: secret\n  b: hidden\n'),target)

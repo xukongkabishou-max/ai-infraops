@@ -3,9 +3,12 @@
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import { ApprovalLink } from "./approval-link";
 
+type NacosSelection = { line_number: number; config_path: string; source_line: number; source_end_line: number };
+type ValueSnapshot = { snapshot: { value?: string; values?: Array<NacosSelection & { value: string }> }; captured_at: string };
+
 type Approval = {
   id: number; requester_name: string; requester_id: number; category: string;
-  environment_name: string; resource_name: string; target: Record<string, unknown>;
+  environment_name: string; resource_name: string; target: Record<string, unknown> & { selections?: NacosSelection[] };
   reason: string; status: string; created_at: string; reviewed_at: string | null;
   captured_at: string | null; expires_at: string | null; reviewer_name: string | null; review_note: string;
   release_ticket?: string; release_version?: string;
@@ -31,6 +34,7 @@ function targetFields(row: Approval): Array<[string, unknown]> {
     ["Namespace", row.category === "environment" ? row.target.namespace : row.target.namespace_id || "public"],
     ...(row.category === "environment" ? [["工作负载", `${row.target.kind} / ${row.target.workload}`], ["容器", row.target.container]] as Array<[string, unknown]> : [["Group", row.target.group]] as Array<[string, unknown]>),
     ...(row.category === "nacos" && row.target.line_number ? [["结构行号", row.target.line_number], ["配置路径", row.target.config_path], ["原文行号", row.target.source_line === row.target.source_end_line ? row.target.source_line : `${row.target.source_line}-${row.target.source_end_line}`]] as Array<[string, unknown]> : []),
+    ...(row.target.line_ranges ? [["申请页面行号", row.target.line_ranges], ["配置值数量", row.target.selections?.length], ["配置路径", row.target.selections?.map(item => `第 ${item.line_number} 行：${item.config_path}（原文 ${item.source_line}-${item.source_end_line} 行）`).join("；")]] as Array<[string, unknown]> : []),
   ];
 }
 
@@ -55,7 +59,7 @@ export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: strin
   const [to, setTo] = useState("");
   const [keyword, setKeyword] = useState("");
   const [filters, setFilters] = useState({ from:"", to:"", keyword:"" });
-  const [snapshots, setSnapshots] = useState<Record<number, { snapshot: { value: string }; captured_at: string }>>({});
+  const [snapshots, setSnapshots] = useState<Record<number, ValueSnapshot>>({});
   const [reading, setReading] = useState<number | null>(null);
   const snapshotGeneration = useRef(0);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -180,7 +184,7 @@ export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: strin
       {snapshots[row.id] ? <div className="min-w-0 space-y-3 border-l-2 border-emerald-400 pl-4">
         <div className="flex items-center justify-between gap-3"><h3 className="text-sm font-bold">审批时的历史快照</h3><button className="text-xs text-[#9fb0ff]" onClick={() => setSnapshots(current => { const next={...current}; delete next[row.id]; return next; })}>隐藏快照</button></div>
         <p className="text-xs text-emerald-300">采集时间：{time(snapshots[row.id].captured_at)}</p>
-        <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{snapshots[row.id].snapshot.value === "" ? "（空字符串）" : snapshots[row.id].snapshot.value}</pre>
+        <div className="max-h-[520px] overflow-auto">{snapshots[row.id].snapshot.values ? snapshots[row.id].snapshot.values!.map(item => <div key={item.line_number} className="border-b border-white/10 py-3"><p className="mb-2 break-all text-xs text-[#c9d2f0]">页面第 {item.line_number} 行 · {item.config_path} · 原文 {item.source_line}-{item.source_end_line} 行</p><pre className="whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{item.value === "" ? "（空字符串）" : item.value}</pre></div>) : <pre className="whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{snapshots[row.id].snapshot.value === "" ? "（空字符串）" : snapshots[row.id].snapshot.value}</pre>}</div>
       </div> : null}
     </article></td></tr> : null}</Fragment>)}</tbody></table></div>
     <div className="flex items-center justify-end gap-3 text-sm"><span>第 {page} 页</span><button className={control} disabled={page <= 1} onClick={() => { clearSnapshots(); setRows([]); setLoading(true); setPage(page-1); }}>上一页</button><button className={control} disabled={page * 20 >= total} onClick={() => { clearSnapshots(); setRows([]); setLoading(true); setPage(page+1); }}>下一页</button></div>

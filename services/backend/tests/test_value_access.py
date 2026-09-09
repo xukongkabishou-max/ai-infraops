@@ -12,6 +12,83 @@ from app import nacos_value_selection as selection
 NACOS_SOURCE = '# internal comment\n\npassword: secret\nother: must-stay-hidden\n'
 
 
+def submit_ranges(client, source, expression="18-26，36-57"):
+    document = selection.parse_config_document(source, "yaml", selection.selection_scope(1, "", "DEFAULT_GROUP", "app.yaml", "yaml"))
+    payload = dict(category="nacos", instance_id=1, namespace_id="", group="DEFAULT_GROUP", data_id="app.yaml",
+        config_type="yaml", config_revision=document.revision, line_ranges=expression)
+    return client.post("/api/value-requests", json=payload)
+
+
+def test_multi_range_workflow_maps_exact_source_and_preserves_isolation(system, monkeypatch):
+    client, db, current, _ = system
+    source = '# private comment\n\nroot:\n' + ''.join(f'  key{i}: test-value-{i}\n\n# private comment\n' for i in range(1,61))
+    monkeypatch.setattr(access, "fetch_nacos_config_content", lambda *args: source)
+    result = submit_ranges(client, source)
+    assert result.status_code == 201, result.text
+    request_id = result.json()['id']
+    path = f'/api/value-requests/{request_id}'
+    detail = client.get(path)
+    assert 'test-value-' not in detail.text
+    assert detail.json()['items'][0]['target']['scope_version'] == 2
+    assert client.get(path+'/value').status_code == 403
+    assert client.post(f'/api/admin/value-requests/{request_id}/review', json={'decision':'approved'}).status_code == 200
+    expected_numbers = list(range(18,27)) + list(range(36,58))
+    expected = [{'line_number':n,'config_path':f'/root/key{n-1}','source_line':4+(n-2)*3,
+        'source_end_line':4+(n-2)*3,'value':f'test-value-{n-1}'} for n in expected_numbers]
+    for endpoint in (path+'/value', f'/api/admin/value-requests/{request_id}/value'):
+        result = client.get(endpoint)
+        assert result.status_code == 200
+        assert result.json()['snapshot']['values'] == expected
+        assert 'value' not in result.json()['snapshot']
+        assert result.headers['cache-control'] == 'no-store, private'
+    current['user'] = 3
+    assert client.get(path).status_code == 404
+    assert client.get(path+'/value').status_code == 404
+    current['user'] = 2
+    db.execute('UPDATE value_access_requests SET expires_at=?', (access.now_utc()-timedelta(seconds=1),))
+    monkeypatch.setattr(access, "fetch_nacos_config_content", lambda *args: (_ for _ in ()).throw(AssertionError('must not fetch history')))
+    assert client.get(path+'/value').json()['snapshot']['values'] == expected
+
+
+@pytest.mark.parametrize('tamper', ['source', 'path', 'original_line', 'range'])
+def test_multi_range_approval_refuses_changed_version_or_mapping(system, monkeypatch, tamper):
+    client, db, _, _ = system
+    result = submit_ranges(client, NACOS_SOURCE, '1')
+    assert result.status_code == 201
+    request_id = result.json()['id']
+    if tamper == 'source':
+        monkeypatch.setattr(access, 'fetch_nacos_config_content', lambda *args: '# new comment\n'+NACOS_SOURCE)
+    else:
+        target = json.loads(db.execute('SELECT target FROM value_access_requests WHERE id=?',(request_id,)).fetchone()[0])
+        if tamper == 'path': target['selections'][0]['config_path'] = '/other'
+        if tamper == 'original_line': target['selections'][0]['source_line'] += 1
+        if tamper == 'range': target['line_ranges'] = '1-2'
+        db.execute('UPDATE value_access_requests SET target=? WHERE id=?',(json.dumps(target),request_id))
+    result = client.post(f'/api/admin/value-requests/{request_id}/review',json={'decision':'approved'})
+    assert result.status_code == 409 and 'secret' not in result.text
+    assert db.execute('SELECT status,snapshot_ciphertext FROM value_access_requests WHERE id=?',(request_id,)).fetchone()[:] == ('pending',None)
+
+
+def test_multi_range_snapshot_cannot_return_added_values(system):
+    client, db, _, _ = system
+    request_id = submit_ranges(client, NACOS_SOURCE, '1').json()['id']
+    assert client.post(f'/api/admin/value-requests/{request_id}/review',json={'decision':'approved'}).status_code == 200
+    path = f'/api/value-requests/{request_id}/value'
+    snapshot = client.get(path).json()['snapshot']
+    snapshot['values'].append({'line_number':2,'config_path':'/other','source_line':4,'source_end_line':4,'value':'must-stay-hidden'})
+    ciphertext, nonce = access._encrypt_password(json.dumps(snapshot),access.aad(request_id))
+    db.execute('UPDATE value_access_requests SET snapshot_ciphertext=?,snapshot_nonce=? WHERE id=?',(ciphertext,nonce,request_id))
+    result = client.get(path)
+    assert result.status_code == 410 and 'must-stay-hidden' not in result.text
+
+
+@pytest.mark.parametrize('expression', ['0', '1~2', '2-1', '40001', '1,,2'])
+def test_multi_range_api_rejects_invalid_ranges(system, expression):
+    client, db, _, _ = system
+    assert submit_ranges(client, NACOS_SOURCE, expression).status_code == 422
+    assert db.execute('SELECT COUNT(*) FROM value_access_requests').fetchone()[0] == 0
+
+
 @pytest.fixture
 def system(monkeypatch):
     sqlite3.register_adapter(datetime, lambda value: value.isoformat(" "))
