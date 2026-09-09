@@ -227,7 +227,13 @@ def canonical_grants(statements):
             if token.is_whitespace:
                 continue
             tokens.append(token.value.upper() if token.ttype in sql_tokens.Keyword else token.value)
-        result.add(tuple(tokens))
+        # A server may merge grants on the same scope or reorder privilege names.
+        if tokens and tokens[0] == 'GRANT' and 'ON' in tokens and '(' not in tokens[:tokens.index('ON')]:
+            split = tokens.index('ON')
+            privileges = ' '.join(tokens[1:split]).split(',')
+            result.update(('GRANT', privilege.strip(), *tokens[split:]) for privilege in privileges)
+        else:
+            result.add(tuple(tokens))
     return result
 
 
@@ -240,13 +246,35 @@ def verify_grants(connection, kind, destination, expected):
 def table_plan(connection, kind, selected, mode, destination):
     available = {}
     statements = []
-    privileges = ('SELECT' if mode == 'read' else 'SELECT,INSERT,UPDATE,DELETE') if kind == 'mysql' else ('SELECT_PRIV' if mode == 'read' else 'SELECT_PRIV,LOAD_PRIV')
-    for database, table in sorted({(item.database, item.table) for item in selected}):
-        if database not in available:
-            available[database] = set(tables(connection, database))
-        if table not in available[database]:
-            raise AccountError('所选表已不存在，请刷新库表列表')
-        obj = ('`internal`.' if kind == 'doris' else '') + identifier(database) + '.' + identifier(table)
+    choices = {}
+    mysql_literal_scopes = None
+    for item in selected:
+        key = (item.database, item.table)
+        access = getattr(item, 'access', None) or mode
+        if key in choices and choices[key] != access:
+            raise AccountError('同一库表不能同时指定两种权限')
+        choices[key] = access
+    for (database, table), access in sorted(choices.items(), key=lambda item:(item[0][0],item[0][1] or '')):
+        privileges = ('SELECT' if access == 'read' else 'SELECT,INSERT,UPDATE,DELETE') if kind == 'mysql' else ('SELECT_PRIV' if access == 'read' else 'SELECT_PRIV,LOAD_PRIV')
+        if table is None:
+            if database in SYSTEM_DATABASES or database not in databases(connection):
+                raise AccountError('所选数据库不存在或属于系统库')
+            if kind == 'mysql' and mysql_literal_scopes is None:
+                mysql_literal_scopes = bool(query(connection,'SELECT @@partial_revokes AS enabled')[0]['enabled'])
+        else:
+            if database not in available:
+                available[database] = set(tables(connection, database))
+            if table not in available[database]:
+                raise AccountError('所选表已不存在，请刷新库表列表')
+        inherited = choices.get((database,None)) if table is not None else None
+        if inherited == 'write' and access == 'read':
+            raise AccountError('整库已授权读写，无法把其中一张表限制为只读；请改用逐表授权')
+        if inherited == access:
+            continue
+        scope_database = database
+        if kind == 'mysql' and table is None and not mysql_literal_scopes:
+            scope_database = database.replace('\\','\\\\').replace('_',r'\_').replace('%',r'\%')
+        obj = ('`internal`.' if kind == 'doris' else '') + identifier(scope_database) + '.' + (identifier(table) if table is not None else '*')
         statements.append(f'GRANT {privileges} ON {obj} TO {destination}')
     return statements
 

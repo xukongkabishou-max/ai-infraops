@@ -75,7 +75,8 @@ class AccountRoute(APIRoute):
 class TableGrant(BaseModel):
     model_config = ConfigDict(extra='forbid')
     database: str = Field(min_length=1, max_length=255)
-    table: str = Field(min_length=1, max_length=255)
+    table: str | None = Field(min_length=1, max_length=255)
+    access: Literal['read','write'] | None = None
 
 
 class CreateAccount(BaseModel):
@@ -402,4 +403,6 @@ def build_database_account_router(require_admin):
             resource_type='middleware',resource_id=str(instance_id),details={'identity':destination,'source_identity':payload.source_identity,'access':payload.access,'tables':[item.model_dump() for item in payload.tables],'expires_days':payload.expires_days})
         return operation_result(load_operation(payload.operation_id))
 
+    from .database_permission_routes import install_permission_routes
+    install_permission_routes(router,only_admin)
     return router
