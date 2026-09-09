@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -194,9 +194,25 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
             connection.close()
         return {"id": request_id, "status": "pending", "detail_path": f"/approvals/{request_id}"}
 
-    def list_records(response, category, page, status, owner=None):
+    def list_records(response, category, page, status, owner=None, date_from=None, date_to=None, keyword=""):
         response.headers["Cache-Control"] = "no-store"
         clauses, params = [], []
+        if date_from and date_to and date_from > date_to:
+            raise HTTPException(422, "开始日期不能晚于结束日期")
+        try:
+            local_zone = timezone(timedelta(hours=8))
+            if date_from:
+                clauses.append("a.created_at>=%s")
+                params.append(datetime.combine(date_from, time.min, local_zone).astimezone(timezone.utc).replace(tzinfo=None))
+            if date_to:
+                clauses.append("a.created_at<=%s")
+                params.append(datetime.combine(date_to, time.max, local_zone).astimezone(timezone.utc).replace(tzinfo=None))
+        except OverflowError:
+            raise HTTPException(422, "日期超出支持范围") from None
+        if keyword.strip():
+            pattern = "%" + keyword.strip().replace("=", "==").replace("%", "=%").replace("_", "=_") + "%"
+            clauses.append("(a.environment_name LIKE %s ESCAPE '=' OR a.resource_name LIKE %s ESCAPE '=' OR a.target LIKE %s ESCAPE '=' OR u.username LIKE %s ESCAPE '=' OR a.release_ticket LIKE %s ESCAPE '=')")
+            params.extend([pattern] * 5)
         if owner is not None:
             clauses.append("a.requester_id=%s")
             params.append(owner)
@@ -214,13 +230,16 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
                 clauses.append("a.status=%s")
                 params.append(status)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        count = execute_query("SELECT COUNT(*) AS total FROM value_access_requests a" + where, tuple(params))[0]["total"]
-        rows = execute_query(SELECT_META + where + " ORDER BY a.id DESC LIMIT 20 OFFSET %s", (*params, (page-1)*20))
+        count = execute_query("SELECT COUNT(*) AS total FROM value_access_requests a JOIN rbac_users u ON u.id=a.requester_id" + where, tuple(params))[0]["total"]
+        rows = execute_query(SELECT_META + where + " ORDER BY a.created_at DESC,a.id DESC LIMIT 20 OFFSET %s", (*params, (page-1)*20))
         return {"items": [metadata(row) for row in rows], "total": count, "page": page,
                 "server_now": now_utc().replace(tzinfo=timezone.utc).isoformat()}
 
     @router.get("/api/value-requests")
     def own_requests(response: Response, category: Literal["environment", "nacos"] | None = None,
+                     status: Literal["pending", "approved", "rejected", "expired", "invalidated"] | None = None,
+                     date_from: date | None = None, date_to: date | None = None,
+                     keyword: str = Query(default="", max_length=200),
                      page: int = Query(default=1, ge=1), session=Depends(require_user)):
         uid = session["user"]["id"]
         if category:
@@ -228,14 +247,16 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
         else:
             if not execute_query("SELECT id FROM rbac_users WHERE id=%s AND is_active=1", (uid,)):
                 raise HTTPException(403, "账号已停用")
-        return list_records(response, category, page, None, uid)
+        return list_records(response, category, page, status, uid, date_from, date_to, keyword)
 
     @router.get("/api/admin/value-requests")
     def all_requests(response: Response, category: Literal["environment", "nacos"] | None = None,
                      status: Literal["pending", "approved", "rejected", "expired", "invalidated"] | None = None,
+                     date_from: date | None = None, date_to: date | None = None,
+                     keyword: str = Query(default="", max_length=200),
                      page: int = Query(default=1, ge=1), session=Depends(require_admin)):
         admin_access(session)
-        return list_records(response, category, page, status)
+        return list_records(response, category, page, status, date_from=date_from, date_to=date_to, keyword=keyword)
 
     @router.get("/api/value-requests/{request_id}")
     def request_detail(request_id: int, response: Response, session=Depends(require_user)):
@@ -252,14 +273,14 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
         except HTTPException as exc:
             if exc.status_code != 403:
                 raise
-        if owner:
+        if owner and not administrator:
             session["_audit_permission"] = source_permission(row["category"])
             live_permission(session["user"]["id"], source_permission(row["category"]))
-        elif not administrator:
+        elif not owner and not administrator:
             raise HTTPException(404, "申请不存在或无权访问")
         item = metadata(row)
         item["can_review"] = administrator and not owner and item["status"] == "pending"
-        item["can_view_value"] = owner and item["status"] == "approved"
+        item["can_view_value"] = (owner or administrator) and item["status"] in {"approved", "expired"}
         return {"items": [item], "total": 1, "page": 1,
                 "server_now": now_utc().replace(tzinfo=timezone.utc).isoformat()}
 
@@ -328,26 +349,41 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
             connection.close()
         return {"id": request_id, "status": payload.decision}
 
-    @router.get("/api/value-requests/{request_id}/value")
-    def read_value(request_id: int, response: Response, session=Depends(require_user)):
+    def historical_snapshot(request_id, response, session, administrative=False):
         response.headers["Cache-Control"] = "no-store, private"
         response.headers["Pragma"] = "no-cache"
-        # Ownership is part of the SQL predicate; even administrators cannot read another user's snapshot here.
-        rows = execute_query("SELECT * FROM value_access_requests WHERE id=%s AND requester_id=%s",
-                             (request_id, session["user"]["id"]))
+        if administrative:
+            admin_access(session)
+            rows = execute_query("SELECT * FROM value_access_requests WHERE id=%s", (request_id,))
+        else:
+            rows = execute_query("SELECT * FROM value_access_requests WHERE id=%s AND requester_id=%s",
+                                 (request_id, session["user"]["id"]))
+            if not rows:
+                try:
+                    admin_access(session)
+                except HTTPException as exc:
+                    if exc.status_code == 403:
+                        raise HTTPException(404, "申请不存在或无权访问") from None
+                    raise
+                administrative = True
+                rows = execute_query("SELECT * FROM value_access_requests WHERE id=%s", (request_id,))
         if not rows:
             raise HTTPException(404, "申请不存在")
         row = rows[0]
         target = decode_target(row)
         if row["category"] == "nacos" and not is_scoped_target(target):
             raise HTTPException(410, "旧的整份配置授权已失效，请按行号重新申请")
-        live_permission(session["user"]["id"], source_permission(row["category"]))
-        session["_audit_permission"] = source_permission(row["category"])
+        if not administrative:
+            try:
+                live_permission(session["user"]["id"], source_permission(row["category"]))
+                session["_audit_permission"] = source_permission(row["category"])
+            except HTTPException as exc:
+                if exc.status_code != 403:
+                    raise
+                admin_access(session)
         if row["status"] != "approved":
             raise HTTPException(403, "申请尚未通过审批")
-        if row["expires_at"] <= now_utc():
-            raise HTTPException(410, "查看授权已过期，请重新申请")
-        check_target(row["category"], decode_target(row))
+        # Historical reads never contact the source or expand the original approved scope.
         try:
             snapshot = json.loads(_decrypt_password(row["snapshot_ciphertext"], row["snapshot_nonce"], aad(request_id)))
         except Exception:
@@ -357,10 +393,17 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
                        "config_path", "source_line", "source_end_line", "config_type", "config_revision")
             if any(snapshot.get(key) != target.get(key) for key in binding):
                 raise HTTPException(410, "快照授权范围不匹配，请重新申请")
-        if row["expires_at"] <= now_utc():
-            raise HTTPException(410, "查看授权已过期，请重新申请")
         return {"snapshot": snapshot, "captured_at": row["captured_at"].replace(tzinfo=timezone.utc).isoformat(),
+                "historical": True,
                 "server_now": now_utc().replace(tzinfo=timezone.utc).isoformat(),
                 "expires_at": row["expires_at"].replace(tzinfo=timezone.utc).isoformat()}
+
+    @router.get("/api/value-requests/{request_id}/value")
+    def read_value(request_id: int, response: Response, session=Depends(require_user)):
+        return historical_snapshot(request_id, response, session)
+
+    @router.get("/api/admin/value-requests/{request_id}/value")
+    def read_admin_value(request_id: int, response: Response, session=Depends(require_admin)):
+        return historical_snapshot(request_id, response, session, administrative=True)
 
     return router

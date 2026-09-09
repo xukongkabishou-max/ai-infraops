@@ -509,6 +509,8 @@ export default function Home() {
     }
 
     const meta = sectionMeta[effectiveSection];
+    const isApprovalPage = (effectiveSection === "business" && activeBusinessPage === "approvals")
+      || (effectiveSection === "middleware" && activeMiddlewarePage === "approvals");
 
     return (
       <main className="min-h-screen bg-[#04050b] text-white">
@@ -528,14 +530,14 @@ export default function Home() {
               {visibleNavigationItems.map((item) => {
                 const active = item.key === effectiveSection;
                 return (
+                  <div key={item.key}>
                   <button
                     className={`w-full rounded-[6px] px-4 py-3 text-left transition ${
                       active
                         ? "bg-[#0a1ae1] text-white shadow-[0_12px_30px_rgba(10,26,225,0.28)]"
                         : "text-[#bfc9e7]/72 hover:bg-[#11183c] hover:text-white"
                     }`}
-                    key={item.key}
-                    onClick={() => setActiveSection(item.key)}
+                    onClick={() => { setActiveSection(item.key); if (item.key === "business" && activeBusinessPage === "approvals") setActiveBusinessPage("nodePorts"); if (item.key === "middleware" && activeMiddlewarePage === "approvals") setActiveMiddlewarePage("nacosKeys"); }}
                     type="button"
                   >
                     <span className="block text-sm font-bold">{item.label}</span>
@@ -543,6 +545,14 @@ export default function Home() {
                       {item.hint}
                     </span>
                   </button>
+                  {active && (item.key === "business" || item.key === "middleware") ? <div className="ml-4 mt-1 border-l border-white/15 pl-3">
+                    <button type="button" aria-current={isApprovalPage ? "page" : undefined}
+                      className={`w-full rounded-[5px] px-3 py-2.5 text-left text-xs font-semibold ${isApprovalPage ? "bg-[#16204c] text-white" : "text-[#bfc9e7]/65 hover:bg-white/5"}`}
+                      onClick={() => { if (item.key === "business") setActiveBusinessPage("approvals"); else setActiveMiddlewarePage("approvals"); }}>
+                      {item.key === "business" ? "环境变量审批记录" : "Nacos 审批记录"}
+                    </button>
+                  </div> : null}
+                  </div>
                 );
               })}
             </nav>
@@ -552,8 +562,8 @@ export default function Home() {
             <header className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 px-6 py-5 lg:px-8">
               <div className="max-w-5xl">
                 <p className="text-sm font-semibold text-[#4b5fc6]">{meta.eyebrow}</p>
-                <h1 className="mt-1 text-2xl font-black tracking-normal">{meta.title}</h1>
-                <p className="mt-3 max-w-4xl text-sm leading-6 text-[#bfc9e7]/72">{meta.summary}</p>
+                <h1 className="mt-1 text-2xl font-black tracking-normal">{isApprovalPage ? effectiveSection === "business" ? "环境变量审批记录" : "Nacos 审批记录" : meta.title}</h1>
+                {!isApprovalPage ? <p className="mt-3 max-w-4xl text-sm leading-6 text-[#bfc9e7]/72">{meta.summary}</p> : null}
               </div>
               <button
                 className="h-10 rounded-[6px] border border-[#4b5fc6] px-4 text-sm font-bold text-[#bfc9e7] transition hover:bg-[#11183c]"
@@ -565,7 +575,7 @@ export default function Home() {
             </header>
 
             <div className="space-y-5 px-6 py-6 lg:px-8">
-              <ImplementationPanel text={meta.implementation} />
+              {!isApprovalPage ? <ImplementationPanel text={meta.implementation} /> : null}
               {effectiveSection === "machine" ? (
                 <MachineInformationView
                   activePage={activeMachinePage}
@@ -1733,12 +1743,11 @@ function BusinessSystemView({
     { key: "imageTags", label: "镜像管理", hint: "按环境和 namespace 查看镜像" },
     { key: "gpuModels", label: "GPU 模型显存", hint: "模型、显存与空闲卡" },
     { key: "envKeys", label: "环境变量 key", hint: "只展示 key，不展示 value" },
-    { key: "approvals", label: "我的审批记录", hint: "环境变量数值" },
   ];
 
   return (
     <div className="space-y-5">
-      <SubPageNav activeKey={activePage} items={pages} onChange={onSetActivePage} />
+      {activePage !== "approvals" ? <SubPageNav activeKey={activePage} items={pages} onChange={onSetActivePage} /> : null}
 
       {activePage === "nodePorts" ? (
         <NodePortInventoryView />
@@ -2604,7 +2613,6 @@ function MiddlewareSystemView({
   const pages: Array<{ key: MiddlewarePageKey; label: string; hint: string }> = [
     { key: "nacosKeys", label: "Nacos 配置目录", hint: "Namespace、Group 与配置名称" },
     { key: "healthChecks", label: "数据库可用性校验", hint: "MySQL、Doris、Redis、Kafka" },
-    { key: "approvals", label: "我的审批记录", hint: "Nacos 配置数值" },
   ];
   const selectedNamespace = nacosCatalog?.namespaces.find(
     (namespace) => namespace.namespace_id === selectedNamespaceId,
@@ -2613,7 +2621,7 @@ function MiddlewareSystemView({
 
   return (
     <div className="space-y-5">
-      <SubPageNav activeKey={activePage} items={pages} onChange={onSetActivePage} />
+      {activePage !== "approvals" ? <SubPageNav activeKey={activePage} items={pages} onChange={onSetActivePage} /> : null}
 
       {activePage === "nacosKeys" ? (
         <SectionBlock title="Nacos 配置目录" description="选择后台已登记的环境，查询 Namespace、Group、配置名称与格式；点击配置右侧的查看内容，在当前配置下方展开已清空 value 的结构。">

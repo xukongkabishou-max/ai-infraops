@@ -132,7 +132,7 @@ def test_full_workflow_and_user_isolation(system, category):
     assert value.encode() not in stored
     assert client.post(f"/api/admin/value-requests/{request_id}/review", json={"decision": "approved"}).status_code == 409
     current["user"] = 1
-    assert client.get(path).status_code == 404
+    assert client.get(path).status_code == 200
 
 
 def test_expiry_permission_revocation_and_namespace_revocation(system):
@@ -141,7 +141,7 @@ def test_expiry_permission_revocation_and_namespace_revocation(system):
     client.post(f"/api/admin/value-requests/{request_id}/review", json={"decision": "approved"})
     path = f"/api/value-requests/{request_id}/value"
     current["namespace_allowed"] = False
-    assert client.get(path).status_code == 403
+    assert client.get(path).status_code == 200
     current["namespace_allowed"] = True
     db.execute("UPDATE rbac_roles SET is_active=0")
     assert client.get(path).status_code == 403
@@ -150,7 +150,7 @@ def test_expiry_permission_revocation_and_namespace_revocation(system):
     assert client.get(path).status_code == 403
     db.execute("UPDATE rbac_users SET is_active=1 WHERE id=2")
     db.execute("UPDATE value_access_requests SET expires_at=?", (access.now_utc()-timedelta(seconds=1),))
-    assert client.get(path).status_code == 410
+    assert client.get(path).status_code == 200
     assert client.get("/api/value-requests").json()["items"][0]["status"] == "expired"
     assert client.get("/api/admin/value-requests?status=expired").json()["total"] == 1
 
@@ -273,9 +273,9 @@ def test_direct_link_detail_is_visible_only_to_owner_or_live_administrator(syste
     assert client.get(path).json()['items'][0]['can_review']
     assert client.post(path+'/review', json={'decision':'approved'}).status_code == 200
     detail = client.get(path).json()['items'][0]
-    assert not detail['can_review'] and not detail['can_view_value']
+    assert not detail['can_review'] and detail['can_view_value']
     assert 'snapshot_ciphertext' not in detail and 'private' not in json.dumps(detail)
-    assert client.get(path+'/value').status_code == 404
+    assert client.get(path+'/value').status_code == 200
     current['user'] = 2
     assert client.get(path).json()['items'][0]['can_view_value']
     db.execute('UPDATE rbac_users SET is_active=0 WHERE id=2')
@@ -308,3 +308,77 @@ def test_detail_link_cannot_self_approve_or_reuse_revoked_administrator(system):
     db.execute('UPDATE rbac_users SET is_superuser=0 WHERE id=1')
     assert client.get(f'/api/value-requests/{other}').status_code == 404
     assert client.post(f'/api/value-requests/{other}/review', json={'decision':'approved'}).status_code == 403
+
+
+@pytest.mark.parametrize("category", ["environment", "nacos"])
+def test_expired_snapshots_remain_immutable_for_owner_and_administrator(system, monkeypatch, category):
+    client, db, current, _ = system
+    request_id = submit(client, category)
+    assert client.post(f'/api/admin/value-requests/{request_id}/review', json={'decision':'approved'}).status_code == 200
+    original = client.get(f'/api/value-requests/{request_id}/value').json()
+    db.execute('UPDATE value_access_requests SET expires_at=? WHERE id=?', (access.now_utc()-timedelta(days=3), request_id))
+    current['namespace_allowed'] = False
+    db.execute("UPDATE machine_hosts SET status='disabled'")
+    db.execute("UPDATE middleware_instances SET status='disabled'")
+    def forbidden(*args, **kwargs): raise AssertionError('Historical reads must not fetch source values')
+    monkeypatch.setattr(access,'get_workload_environment_keys',forbidden)
+    monkeypatch.setattr(access,'fetch_nacos_config_content',forbidden)
+    result = client.get(f'/api/value-requests/{request_id}/value')
+    assert result.status_code == 200
+    assert result.json()['snapshot'] == original['snapshot']
+    assert result.json()['captured_at'] == original['captured_at']
+    assert result.json()['historical']
+    admin_result = client.get(f'/api/admin/value-requests/{request_id}/value')
+    assert admin_result.status_code == 200 and admin_result.json()['snapshot'] == original['snapshot']
+    current['user'] = 3
+    assert client.get(f'/api/value-requests/{request_id}/value').status_code == 404
+    current['admin'] = 3
+    assert client.get(f'/api/admin/value-requests/{request_id}/value').status_code == 403
+    current['admin'] = 1
+    assert 'snapshot_ciphertext' not in client.get('/api/admin/value-requests').text
+
+
+def test_history_dates_include_whole_local_days_and_preserve_owner_filters(system):
+    client, db, current, _ = system
+    ids = [submit(client) for _ in range(4)]
+    timestamps = [datetime(2026,9,7,15,59,59), datetime(2026,9,7,16),
+                  datetime(2026,9,8,15,59,59,999999),datetime(2026,9,8,16)]
+    for request_id, timestamp in zip(ids,timestamps):
+        db.execute('UPDATE value_access_requests SET created_at=? WHERE id=?',(timestamp,request_id))
+    query = '?date_from=2026-09-08&date_to=2026-09-08'
+    rows = client.get('/api/value-requests'+query).json()
+    assert rows['total'] == 2
+    assert [row['id'] for row in rows['items']] == [ids[2],ids[1]]
+    assert client.get('/api/admin/value-requests'+query).json()['total'] == 2
+    current['user'] = 3
+    assert client.get('/api/value-requests'+query).json()['total'] == 0
+    assert client.get('/api/value-requests?date_from=2026-09-09&date_to=2026-09-08').status_code == 422
+    assert client.get('/api/admin/value-requests?date_from=invalid').status_code == 422
+
+
+def test_history_search_category_status_and_pagination(system):
+    client, db, _, _ = system
+    for _ in range(21): submit(client)
+    nacos = submit(client,'nacos')
+    assert client.get('/api/value-requests?category=environment').json()['total'] == 21
+    assert len(client.get('/api/value-requests?category=environment&page=2').json()['items']) == 1
+    assert client.get('/api/value-requests?keyword=TEST_KEY').json()['total'] == 21
+    assert client.get('/api/value-requests?keyword=%25').json()['total'] == 0
+    db.execute('UPDATE value_access_requests SET release_ticket=? WHERE id=?',('REL_100%',nacos))
+    assert client.get('/api/admin/value-requests?keyword=REL_100%25').json()['total'] == 1
+    assert client.get('/api/value-requests?status=rejected').json()['total'] == 0
+    client.post(f'/api/admin/value-requests/{nacos}/review',json={'decision':'rejected'})
+    assert client.get('/api/value-requests?category=nacos&status=rejected').json()['total'] == 1
+    assert client.get(f'/api/admin/value-requests/{nacos}/value').status_code == 403
+
+
+def test_reviewer_can_read_own_history_without_current_source_permission(system):
+    client, db, _, _ = system
+    request_id = submit(client)
+    assert client.post(f'/api/admin/value-requests/{request_id}/review',json={'decision':'approved'}).status_code == 200
+    db.execute('INSERT INTO rbac_roles VALUES (2,1)')
+    db.execute("INSERT INTO rbac_permissions VALUES (3,'admin:console:access',1),(4,'value:approve',1)")
+    db.execute('INSERT INTO rbac_role_permissions VALUES (2,3),(2,4)')
+    db.execute('UPDATE rbac_user_roles SET role_id=2 WHERE user_id=2')
+    assert client.get(f'/api/value-requests/{request_id}').json()['items'][0]['can_view_value']
+    assert client.get(f'/api/value-requests/{request_id}/value').status_code == 200
