@@ -1,0 +1,4 @@
+ALTER TABLE rbac_users
+  ADD COLUMN added_at DATETIME(6) NULL,
+  ADD COLUMN added_by BIGINT UNSIGNED NULL,
+  ADD COLUMN added_by_name VARCHAR(128) NULL;

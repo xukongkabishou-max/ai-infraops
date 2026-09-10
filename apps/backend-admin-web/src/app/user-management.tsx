@@ -6,6 +6,7 @@ type User = {
   id: number; username: string; display_name: string; is_active: boolean | number;
   is_superuser: boolean | number; last_login_at: string | null;
   has_stored_password: boolean | number; password_changed_at: string | null;
+  added_at?: string | null; added_by_name?: string | null; role_codes?: string;
 };
 const control = "min-h-10 rounded-[6px] border border-[#4b5fc6] px-3 py-2 text-sm font-bold text-[#c9d2f0] disabled:opacity-40";
 const inputClass = "mt-2 h-11 w-full rounded-[6px] border border-white/20 bg-[#04050b] px-3 font-mono text-white";
@@ -31,9 +32,33 @@ export function UserManagement({ accessToken, apiBaseUrl, currentUserId, canRese
   const [reading, setReading] = useState<number | null>(null);
   const [visiblePasswords, setVisiblePasswords] = useState<Record<number, string>>({});
   const dialog = useRef<HTMLDialogElement>(null);
+  const accountDialog=useRef<HTMLDialogElement>(null);
+  const [editing,setEditing]=useState<User|null>(null);
+  const [accountName,setAccountName]=useState("");
+  const [displayName,setDisplayName]=useState("");
+  const [role,setRole]=useState("rd");
+  const [active,setActive]=useState(true);
+  const [customPassword,setCustomPassword]=useState(false);
+  const [initialPassword,setInitialPassword]=useState("");
   const operator = users.find(user => user.id === currentUserId);
   const mayReset = canResetPasswords && Boolean(operator?.is_active && operator?.is_superuser);
   const mayView = canViewPasswords && mayReset && operator?.username === "admin";
+  function openAccount(user:User|null){
+    setEditing(user);setAccountName(user?.username??"");setDisplayName(user?.display_name??"");setRole(user?.is_superuser?"super_admin":"rd");setActive(user?Boolean(user.is_active):true);setCustomPassword(false);setInitialPassword("");setFormError("");accountDialog.current?.showModal();
+  }
+  async function saveAccount(event:FormEvent){
+    event.preventDefault();if(saving||!mayView)return;setSaving(true);setFormError("");
+    try{
+      const body={username:accountName,display_name:displayName,role,is_active:active,...(!editing?{password:customPassword?initialPassword:null}:{})};
+      const response=await fetch(`${apiBaseUrl}/api/rbac/users${editing?`/${editing.id}`:""}`,{method:editing?"PUT":"POST",headers:{Authorization:`Bearer ${accessToken}`,"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const result=await response.json();if(!response.ok)throw new Error(typeof result.detail==="string"?result.detail:"保存失败");
+      accountDialog.current?.close();setInitialPassword("");
+      if(result.reauthenticate){onOwnPasswordChanged();return;}
+      if(!editing)setVisiblePasswords(current=>({...current,[result.id]:result.password}));
+      else setVisiblePasswords({});
+      setNotice(editing?`${accountName} 已更新，原登录会话已失效`:`${accountName} 已添加，初始密码已显示在列表中`);setRevision(value=>value+1);
+    }catch(e){setFormError(e instanceof Error?e.message:"保存失败");}finally{setSaving(false);}
+  }
   useEffect(() => {
     const controller = new AbortController();
     fetch(`${apiBaseUrl}/api/rbac/users`, { headers: { Authorization: `Bearer ${accessToken}` }, cache: "no-store", signal: controller.signal })
@@ -91,27 +116,27 @@ export function UserManagement({ accessToken, apiBaseUrl, currentUserId, canRese
     finally { setReading(null); }
   }
   return <section className="min-w-0 space-y-5">
-    <div className="flex items-center justify-between gap-4"><h2 className="text-lg font-bold">用户列表 · {users.length}</h2><button className={control} onClick={() => { setVisiblePasswords({}); setLoading(true); setRevision(value => value + 1); }}>刷新</button></div>
+    <div className="flex flex-wrap items-center justify-between gap-4"><h2 className="mr-auto text-lg font-bold">用户列表 · {users.length}</h2>{mayView?<button className={control+" bg-[#0a1ae1]"} onClick={()=>openAccount(null)}>添加用户</button>:null}<button className={control} onClick={() => { setVisiblePasswords({}); setLoading(true); setRevision(value => value + 1); }}>刷新</button></div>
     {notice ? <p role="status" className="text-sm text-emerald-300">{notice}</p> : null}
     {error ? <p role="alert" className="text-sm text-red-300">{error}</p> : null}
     {loading ? <p className="text-sm text-[#bfc9e7]">正在加载...</p> : null}
     <div className="overflow-x-auto">
       <table className="w-full min-w-[760px] text-left text-sm">
         <thead className="border-b border-white/15 text-xs text-[#bfc9e7]/60"><tr>
-          <th className="py-3 pr-5">账号</th><th className="py-3 pr-5">名称</th><th className="py-3 pr-5">状态</th>
+          <th className="py-3 pr-5">账号</th><th className="py-3 pr-5">名称</th><th className="py-3 pr-5">角色</th><th className="py-3 pr-5">状态</th><th className="py-3 pr-5">添加时间</th><th className="py-3 pr-5">添加人</th>
           {mayView ? <th className="py-3 pr-5">当前密码</th> : null}
           <th className="py-3 pr-5">密码修改时间</th><th className="py-3 pr-5">最近登录</th>
           {mayReset ? <th className="py-3 text-right">操作</th> : null}
         </tr></thead>
         <tbody className="divide-y divide-white/10">{users.map(user => <tr key={user.id}>
           <td className="py-5 pr-5 font-bold">{user.username}{user.id === currentUserId ? <span className="ml-2 text-xs font-normal text-[#9fb0ff]">当前账号</span> : null}</td>
-          <td className="py-5 pr-5 text-[#bfc9e7]">{user.display_name}</td><td className={`py-5 pr-5 ${user.is_active ? "text-emerald-300" : "text-[#bfc9e7]"}`}>{user.is_active ? "启用" : "禁用"}</td>
+          <td className="py-5 pr-5 text-[#bfc9e7]">{user.display_name}</td><td className="py-5 pr-5 text-xs">{user.is_superuser?"超级管理员":user.role_codes?.includes("ops")?"运维（历史角色）":"普通 RD"}</td><td className={`py-5 pr-5 ${user.is_active ? "text-emerald-300" : "text-[#bfc9e7]"}`}>{user.is_active ? "启用" : "禁用"}</td><td className="py-5 pr-5 text-xs">{time(user.added_at??null)}</td><td className="py-5 pr-5 text-xs">{user.added_by_name??"-"}</td>
           {mayView ? <td className="max-w-xs py-5 pr-5">{user.has_stored_password ? <div className="space-y-2">
             {visiblePasswords[user.id] !== undefined ? <code className="block whitespace-pre-wrap break-all text-[#e0e6f5]">{visiblePasswords[user.id]}</code> : null}
             <button className="text-xs text-[#9fb0ff] underline underline-offset-4 disabled:opacity-40" disabled={reading !== null} onClick={() => reveal(user)}>{reading === user.id ? "读取中..." : visiblePasswords[user.id] !== undefined ? "隐藏密码" : "查看密码"}</button>
           </div> : <span className="text-xs text-[#bfc9e7]/55">未记录，重设后可查看</span>}</td> : null}
           <td className="py-5 pr-5 text-xs text-[#bfc9e7]">{time(user.password_changed_at)}</td><td className="py-5 pr-5 text-xs text-[#bfc9e7]">{time(user.last_login_at)}</td>
-          {mayReset ? <td className="py-5 text-right">{user.username !== "admin" || operator?.username === "admin" ? <button className={control} onClick={() => open(user)}>修改密码</button> : <span className="text-xs text-[#bfc9e7]/55">仅 admin 本人可修改</span>}</td> : null}
+          {mayReset ? <td className="py-5 text-right"><div className="flex justify-end gap-2">{mayView?<button className={control} onClick={()=>openAccount(user)}>编辑</button>:null}{user.username !== "admin" || operator?.username === "admin" ? <button className={control} onClick={() => open(user)}>修改密码</button> : <span className="text-xs text-[#bfc9e7]/55">仅 admin 本人可修改</span>}</div></td> : null}
         </tr>)}</tbody>
       </table>
     </div>
@@ -123,6 +148,16 @@ export function UserManagement({ accessToken, apiBaseUrl, currentUserId, canRese
         <p className="text-sm text-[#bfc9e7]">{selected?.id === currentUserId ? "修改后需使用新密码重新登录。" : "修改后，该用户原有登录会话将失效。"}</p>
         {formError ? <p role="alert" className="text-sm text-red-300">{formError}</p> : null}
         <div className="flex justify-end gap-3"><button className={control} type="button" disabled={saving} onClick={() => dialog.current?.close()}>取消</button><button className={`${control} bg-[#0a1ae1]`} disabled={saving || !mayReset}>{saving ? "保存中..." : "确认修改"}</button></div>
+      </form>
+    </dialog>
+    <dialog ref={accountDialog} onCancel={event=>{if(saving)event.preventDefault();}} onClose={()=>setInitialPassword("")} className="m-auto max-h-[90dvh] w-[min(560px,calc(100vw-32px))] overflow-auto rounded-[6px] border border-[#4b5fc6] bg-[#070b1b] p-6 text-white backdrop:bg-black/70">
+      <form className="space-y-4" onSubmit={saveAccount}><h3 className="text-lg font-bold">{editing?"编辑用户":"添加用户"}</h3>
+        <label className="block text-sm">账号<input required disabled={editing?.username==="admin"} pattern="[A-Za-z][A-Za-z0-9_.-]{1,63}" maxLength={64} value={accountName} onChange={event=>setAccountName(event.target.value)} className={inputClass} /></label>
+        <label className="block text-sm">名称<input required maxLength={128} value={displayName} onChange={event=>setDisplayName(event.target.value)} className={inputClass} /></label>
+        <label className="block text-sm">角色<select disabled={editing?.username==="admin"} value={role} onChange={event=>setRole(event.target.value)} className={inputClass}><option value="rd">普通 RD</option><option value="super_admin">超级管理员</option></select></label>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" disabled={editing?.username==="admin"} checked={active} onChange={event=>setActive(event.target.checked)} />启用账号</label>
+        {!editing?<><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={customPassword} onChange={event=>setCustomPassword(event.target.checked)} />自定义密码</label>{customPassword?<label className="block text-sm">初始密码<input required minLength={8} maxLength={72} type="text" autoComplete="new-password" value={initialPassword} onChange={event=>setInitialPassword(event.target.value)} className={inputClass} /></label>:<p className="text-xs text-[#bfc9e7]">自动生成 8 位密码，包含大小写字母、数字及符号</p>}</>:<p className="text-xs text-[#bfc9e7]">编辑后该用户原有会话将失效；添加时间和添加人不变。</p>}
+        {formError?<p role="alert" className="text-sm text-red-300">{formError}</p>:null}<div className="flex justify-end gap-3"><button type="button" className={control} disabled={saving} onClick={()=>accountDialog.current?.close()}>取消</button><button className={control+" bg-[#0a1ae1]"} disabled={saving}>{saving?"保存中...":"保存用户"}</button></div>
       </form>
     </dialog>
   </section>;

@@ -2797,6 +2797,7 @@ function MiddlewareSystemView({
                                                 </button>
                                               </div>
                                             </div>
+                                            <div className="flex flex-wrap gap-x-5 gap-y-2 border-b border-white/10 px-4 py-3 text-xs leading-5"><span className="text-emerald-300">绿色行号：独立配置值，可申请查看</span><span className="text-[#bfc9e7]/65">灰色行号：层级或容器结构，无独立值</span><span className="text-[#bfc9e7]/65">null 表示值已脱敏，不代表原值为空</span></div>
                                             <div className="max-h-[520px] overflow-auto py-3 font-mono text-xs leading-6 text-[#c9d2f0]" aria-label="带行号的脱敏配置结构">
                                               {nacosStructure.structure.split("\n").map((line, index) => {
                                                 const selection = nacosLinesByNumber.get(index + 1);

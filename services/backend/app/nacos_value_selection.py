@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import re
+from bisect import bisect_right
 from dataclasses import dataclass
 
 import yaml
@@ -62,6 +63,9 @@ class ConfigDocument:
     revision: str
     key_count: int
     selections: dict[int, dict]
+    source: str
+    scalar_ranges: dict[int, tuple[int,int]]
+    key_ranges: list[tuple[int,int]]
 
     def public(self):
         return {
@@ -104,7 +108,7 @@ def parse_config_document(content: str, config_type: str, scope: list) -> Config
     if not isinstance(root, (MappingNode, SequenceNode)):
         raise NacosConfigParseError("配置根节点必须是对象或数组")
 
-    lines, selections = [], {}
+    lines, selections, scalar_ranges, key_ranges = [], {}, {}, []
     node_count = key_count = 0
     is_json = normalized_type == "json"
 
@@ -124,6 +128,7 @@ def parse_config_document(content: str, config_type: str, scope: list) -> Config
             "source_end_line": max(source_line, node.end_mark.line + (1 if node.end_mark.column else 0)),
             "value": value,
         }
+        scalar_ranges[line]=(node.start_mark.index,node.end_mark.index)
 
     def walk(node, path, depth, prefix="", suffix="", source_line=1):
         nonlocal node_count, key_count
@@ -148,6 +153,7 @@ def parse_config_document(content: str, config_type: str, scope: list) -> Config
                 if key_value in seen:
                     raise NacosConfigParseError("配置包含重复 Key，无法唯一定位数值")
                 seen.add(key_value)
+                key_ranges.append((key.start_mark.index,key.end_mark.index))
                 children.append((key_value, value, key.start_mark.line + 1))
             key_count += len(children)
         else:
@@ -181,7 +187,54 @@ def parse_config_document(content: str, config_type: str, scope: list) -> Config
         raise NacosConfigParseError("配置无法安全映射到独立数值") from None
     signed_content = json.dumps(scope, ensure_ascii=False).encode() + b"\0" + content.encode("utf-8")
     revision = hmac.new(_encryption_key(), b"nacos-line-selection:v1\0" + signed_content, hashlib.sha256).hexdigest()
-    return ConfigDocument("json" if is_json else "yaml", "\n".join(lines), revision, key_count, selections)
+    return ConfigDocument("json" if is_json else "yaml", "\n".join(lines), revision, key_count, selections,content,scalar_ranges,key_ranges)
+
+
+def configuration_snapshot(document,selected):
+    from yaml.tokens import ScalarToken, TagToken, AnchorToken, DirectiveToken
+    granted=[document.scalar_ranges[item['line_number']] for item in selected]
+    visible_ranges=sorted(document.key_ranges+granted)
+    starts=[start for start,_ in visible_ranges]
+    output=[];offset=0
+    def whitespace(text):return ''.join(char if char.isspace() else ' ' for char in text)
+    for token in yaml.scan(document.source,Loader=yaml.SafeLoader):
+        start,end=token.start_mark.index,token.end_mark.index
+        if end<=start:continue
+        output.append(whitespace(document.source[offset:start]))
+        text=document.source[start:end]
+        if isinstance(token,ScalarToken):
+            index=bisect_right(starts,start)-1
+            visible=index>=0 and end<=visible_ranges[index][1]
+            if visible and token.style in ('|','>'):
+                header,separator,rest=text.partition('\n')
+                if '#' in header:header=header[:header.index('#')]+whitespace(header[header.index('#'):])
+                text=header+separator+rest
+            output.append(text if visible else 'null'+''.join(char for char in text if char in '\r\n'))
+        elif isinstance(token,(TagToken,AnchorToken,DirectiveToken)):
+            output.append(whitespace(text))
+        else:output.append(text)
+        offset=end
+    output.append(whitespace(document.source[offset:]))
+    content=''.join(output)
+    approved_lines=sorted({line for item in selected for line in range(item['source_line'],item['source_end_line']+1)})
+    return {'format':document.format,'content':content,'line_numbers':'source','approved_lines':approved_lines,'historical_reconstruction':False}
+
+
+def configuration_signature(configuration,target):
+    encoded=json.dumps([target,configuration],ensure_ascii=False,sort_keys=True).encode()
+    return hmac.new(_encryption_key(),b'nacos-configuration-snapshot:v1\0'+encoded,hashlib.sha256).hexdigest()
+
+
+def historical_configuration(values):
+    # Older snapshots contain paths and selected values only, never consult today's live source.
+    tree={}
+    for item in values:
+        parts=[part.replace('~1','/').replace('~0','~') for part in item['config_path'].split('/')[1:]]
+        cursor=tree
+        for part in parts[:-1]:cursor=cursor.setdefault(part,{})
+        if parts:cursor[parts[-1]]=item['value']
+    return {'format':'yaml','content':yaml.safe_dump(tree,allow_unicode=True,sort_keys=False),
+        'line_numbers':'display','approved_lines':[],'historical_reconstruction':True}
 
 
 def verify_selection(document: ConfigDocument, target: dict):

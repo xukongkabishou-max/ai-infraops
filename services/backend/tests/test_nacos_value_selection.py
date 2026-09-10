@@ -143,3 +143,25 @@ def test_collection_header_does_not_grant_descendants_and_out_of_bounds_fails():
     assert [item['value'] for item in selection.verify_selections(document,target)] == ['secret']
     with pytest.raises(NacosConfigParseError):
         selection.verify_selections(parse('# new comment\nroot:\n  a: secret\n  b: hidden\n'),target)
+
+
+def test_configuration_snapshot_preserves_source_layout_only_reveals_selected_scalars():
+    source='# hidden-comment\n\nconsumer:\n  group-id: ${spring.application.name:ecmas-server}\n  auto-offset-reset: latest\n  private: super-secret # secret-comment\n'
+    doc=parse(source)
+    result=selection.configuration_snapshot(doc,[doc.select(2),doc.select(3)])
+    assert '  group-id: ${spring.application.name:ecmas-server}\n  auto-offset-reset: latest\n' in result['content']
+    assert '  private: null' in result['content']
+    assert all(secret not in result['content'] for secret in ('hidden-comment','super-secret','secret-comment'))
+    assert result['approved_lines']==[4,5]
+    assert len(result['content'].splitlines())==len(source.splitlines())
+
+
+def test_configuration_snapshot_blocks_and_json_are_safe_and_valid():
+    import yaml
+    doc=parse('root:\n  block: | # private-header\n    line one\n    line two\n  hidden: |\n    must-not-leak\n')
+    result=selection.configuration_snapshot(doc,[doc.select(2)])
+    assert yaml.safe_load(result['content'])=={'root':{'block':'line one\nline two\n','hidden':None}}
+    assert 'private-header' not in result['content'] and 'must-not-leak' not in result['content']
+    doc=parse('{"approved":true,"hidden":"secret"}','json')
+    result=selection.configuration_snapshot(doc,[doc.select(2)])
+    assert json.loads(result['content'])=={'approved':True,'hidden':None}

@@ -82,6 +82,39 @@ def test_multi_range_snapshot_cannot_return_added_values(system):
     assert result.status_code == 410 and 'must-stay-hidden' not in result.text
 
 
+def test_configuration_snapshot_keeps_structure_without_expanding_approval(system):
+    client,db,_,_=system
+    request_id=submit_ranges(client,NACOS_SOURCE,'1').json()['id']
+    assert client.post(f'/api/admin/value-requests/{request_id}/review',json={'decision':'approved'}).status_code==200
+    path=f'/api/value-requests/{request_id}/value'
+    response=client.get(path);assert response.status_code==200
+    config=response.json()['snapshot']['configuration']
+    assert 'password: secret' in config['content'] and 'other: null' in config['content']
+    assert 'must-stay-hidden' not in response.text
+    assert config['line_numbers']=='source' and not config['historical_reconstruction']
+    snapshot=response.json()['snapshot'];snapshot['configuration']['content']=NACOS_SOURCE
+    cipher,nonce=access._encrypt_password(json.dumps(snapshot),access.aad(request_id))
+    db.execute('UPDATE value_access_requests SET snapshot_ciphertext=?,snapshot_nonce=? WHERE id=?',(cipher,nonce,request_id))
+    assert client.get(path).status_code==410
+
+
+def test_old_configuration_is_reconstructed_only_from_historical_approved_values(system,monkeypatch):
+    client,db,_,_=system
+    request_id=submit_ranges(client,NACOS_SOURCE,'1').json()['id']
+    assert client.post(f'/api/admin/value-requests/{request_id}/review',json={'decision':'approved'}).status_code==200
+    row=db.execute('SELECT snapshot_ciphertext,snapshot_nonce FROM value_access_requests WHERE id=?',(request_id,)).fetchone()
+    snapshot=json.loads(access._decrypt_password(row[0],row[1],access.aad(request_id)))
+    snapshot.pop('configuration');snapshot.pop('configuration_signature')
+    cipher,nonce=access._encrypt_password(json.dumps(snapshot),access.aad(request_id))
+    db.execute('UPDATE value_access_requests SET snapshot_ciphertext=?,snapshot_nonce=? WHERE id=?',(cipher,nonce,request_id))
+    def forbidden(*args):raise AssertionError('History must not fetch current source')
+    monkeypatch.setattr(access,'fetch_nacos_config_content',forbidden)
+    response=client.get(f'/api/value-requests/{request_id}/value')
+    assert response.status_code==200 and response.json()['snapshot']['configuration']['historical_reconstruction']
+    assert 'password: secret' in response.json()['snapshot']['configuration']['content']
+    assert 'must-stay-hidden' not in response.text
+
+
 @pytest.mark.parametrize('expression', ['0', '1~2', '2-1', '40001', '1,,2'])
 def test_multi_range_api_rejects_invalid_ranges(system, expression):
     client, db, _, _ = system

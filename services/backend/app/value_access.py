@@ -1,4 +1,5 @@
 import json
+import hmac
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
 
@@ -11,7 +12,7 @@ from .middleware_crypto import _encrypt_password, _decrypt_password, decrypt_mid
 from .nacos_client import fetch_nacos_config_content
 from .nacos_config_redactor import NacosConfigParseError
 from .nacos_value_selection import (parse_config_document, selection_scope, verify_selection,
-    parse_line_ranges, selection_metadata, verify_selections)
+    parse_line_ranges, selection_metadata, verify_selections,configuration_snapshot,configuration_signature,historical_configuration)
 
 
 class ValueRequest(BaseModel):
@@ -341,9 +342,12 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
                     try:
                         if target["scope_version"] == 2:
                             snapshot = {**target, "values": verify_selections(document, target)}
+                            snapshot['configuration']=configuration_snapshot(document,snapshot['values'])
                         else:
                             selected = verify_selection(document, target)
                             snapshot = {**target, "value": selected["value"]}
+                            snapshot['configuration']=configuration_snapshot(document,[selected])
+                        snapshot['configuration_signature']=configuration_signature(snapshot['configuration'],target)
                     except NacosConfigParseError as exc:
                         raise HTTPException(409, str(exc)) from None
                 captured_at = now_utc()
@@ -416,6 +420,9 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
         except Exception:
             raise HTTPException(503, "快照暂时无法读取") from None
         if row["category"] == "nacos":
+            configuration=snapshot.get('configuration')
+            if configuration is not None and not hmac.compare_digest(snapshot.get('configuration_signature',''),configuration_signature(configuration,target)):
+                raise HTTPException(410,'配置快照授权校验失败，请重新申请')
             binding = ("scope_version", "instance_id", "namespace_id", "group", "data_id", "line_number",
                        "config_path", "source_line", "source_end_line", "config_type", "config_revision", "line_ranges", "selections")
             if any(snapshot.get(key) != target.get(key) for key in binding):
@@ -429,6 +436,9 @@ def build_value_access_router(require_user, require_admin, get_cluster, require_
                         for meta, item in zip(target["selections"], snapshot["values"], strict=True)]}
                 except (KeyError, TypeError, ValueError):
                     raise HTTPException(410, "快照授权范围不匹配，请重新申请") from None
+            selected_values=snapshot.get('values') or [{**target,'value':snapshot.get('value','')}]
+            snapshot['configuration']=configuration if configuration is not None else historical_configuration(selected_values)
+            snapshot.pop('configuration_signature',None)
         return {"snapshot": snapshot, "captured_at": row["captured_at"].replace(tzinfo=timezone.utc).isoformat(),
                 "historical": True,
                 "server_now": now_utc().replace(tzinfo=timezone.utc).isoformat(),

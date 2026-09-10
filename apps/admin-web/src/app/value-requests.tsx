@@ -3,6 +3,7 @@
 import { Fragment, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApprovalLink } from "./approval-link";
 import { parseLineRanges } from "./nacos-line-ranges";
+import { NacosSnapshot, type NacosConfiguration } from "../../../../packages/ui/src/nacos-snapshot";
 
 type Category = "environment" | "nacos";
 export type NacosLine = { line_number: number; config_path: string; source_line: number; source_end_line: number };
@@ -16,7 +17,7 @@ type RequestRecord = {
   requester_name: string; release_ticket?: string; release_version?: string;
   can_review?: boolean; can_view_value?: boolean;
 };
-type Snapshot = { snapshot: { value?: string; values?: Array<NacosLine & { value: string }>; pod_name?: string; container_name?: string; key?: string }; captured_at: string; expires_at: string; server_now: string };
+type Snapshot = { snapshot: { configuration?:NacosConfiguration; value?: string; values?: Array<NacosLine & { value: string }>; pod_name?: string; container_name?: string; key?: string }; captured_at: string; expires_at: string; server_now: string };
 const control = "min-h-9 rounded-[6px] border border-[#4b5fc6] px-3 py-2 text-xs font-bold text-[#c9d2f0] disabled:opacity-40";
 const statusLabels: Record<string, string> = { pending: "待审批", approved: "已通过", rejected: "已拒绝", expired: "已过期", invalidated: "已失效，请重新申请" };
 const errorMessage = (error: unknown, fallback: string) => error instanceof SyntaxError ? "审批服务暂时不可用，请稍后刷新重试" : error instanceof Error ? error.message : fallback;
@@ -210,7 +211,7 @@ export function UserValueRequests({ category, read, requestId, mutate }: { categ
               ["快照采集时间", time(snapshot.captured_at)],
               ...(snapshot.snapshot.pod_name ? [["来源 Pod", snapshot.snapshot.pod_name], ["来源容器", snapshot.snapshot.container_name]] as Array<[string, string | undefined]> : []),
             ]} />
-            <div className="max-h-[520px] overflow-auto">{snapshot.snapshot.values ? snapshot.snapshot.values.map(item => <div key={item.line_number} className="border-b border-white/10 py-3"><p className="mb-2 break-all text-xs text-[#c9d2f0]">页面第 {item.line_number} 行 · {item.config_path} · 原文 {item.source_line}-{item.source_end_line} 行</p><pre className="whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{item.value === "" ? "（空字符串）" : item.value}</pre></div>) : <pre className="whitespace-pre-wrap break-words bg-[#04050b] px-5 py-4 font-mono text-sm leading-7 text-[#e0f2e9] [overflow-wrap:anywhere]">{snapshot.snapshot.value === "" ? "（空字符串）" : snapshot.snapshot.value}</pre>}</div>
+            {snapshot.snapshot.configuration ? <NacosSnapshot configuration={snapshot.snapshot.configuration} /> : <div className="max-h-[520px] overflow-auto">{snapshot.snapshot.values ? snapshot.snapshot.values.map(item => <div key={item.line_number} className="border-b border-white/10 py-3"><p className="mb-2 break-all text-xs text-[#c9d2f0]">页面第 {item.line_number} 行 · {item.config_path} · 原文 {item.source_line}-{item.source_end_line} 行</p><pre className="whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{item.value === "" ? "（空字符串）" : item.value}</pre></div>) : <pre className="whitespace-pre-wrap break-words bg-[#04050b] px-5 py-4 font-mono text-sm leading-7 text-[#e0f2e9] [overflow-wrap:anywhere]">{snapshot.snapshot.value === "" ? "（空字符串）" : snapshot.snapshot.value}</pre>}</div>}
           </div> : null}
         </article></td></tr> : null}</Fragment>;
       })}

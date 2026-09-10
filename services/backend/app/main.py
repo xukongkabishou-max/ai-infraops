@@ -92,6 +92,7 @@ from .schemas import (
 from .session_store import delete_session, load_session, save_session
 from .value_access import build_value_access_router
 from .user_passwords import build_user_password_router
+from .user_management import build_user_management_router
 from .database_accounts import build_database_account_router, expiry_loop
 from .database_account_client import dispose_pools as dispose_account_pools
 
@@ -395,7 +396,8 @@ def list_users(
         """
         SELECT id, username, display_name, email, is_active, is_superuser, last_login_at,
                (password_ciphertext IS NOT NULL AND password_nonce IS NOT NULL) AS has_stored_password,
-               password_changed_at
+               password_changed_at,added_at,added_by_name,
+               (SELECT GROUP_CONCAT(r.code ORDER BY r.code) FROM rbac_user_roles ur JOIN rbac_roles r ON r.id=ur.role_id WHERE ur.user_id=rbac_users.id) AS role_codes
         FROM rbac_users
         ORDER BY id
         """
@@ -3161,4 +3163,5 @@ app.include_router(build_value_access_router(
     get_k8s_cluster_by_host, _require_allowed_namespace,
 ))
 app.include_router(build_user_password_router(require_backend_admin_session, password_context))
+app.include_router(build_user_management_router(require_backend_admin_session, password_context))
 app.include_router(build_database_account_router(require_backend_admin_session))

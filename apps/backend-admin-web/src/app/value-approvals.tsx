@@ -2,9 +2,10 @@
 
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import { ApprovalLink } from "./approval-link";
+import { NacosSnapshot, type NacosConfiguration } from "../../../../packages/ui/src/nacos-snapshot";
 
 type NacosSelection = { line_number: number; config_path: string; source_line: number; source_end_line: number };
-type ValueSnapshot = { snapshot: { value?: string; values?: Array<NacosSelection & { value: string }> }; captured_at: string };
+type ValueSnapshot = { snapshot: { configuration?:NacosConfiguration; value?: string; values?: Array<NacosSelection & { value: string }> }; captured_at: string };
 
 type Approval = {
   id: number; requester_name: string; requester_id: number; category: string;
@@ -184,7 +185,7 @@ export function ValueApprovals({ accessToken, apiBaseUrl }: { accessToken: strin
       {snapshots[row.id] ? <div className="min-w-0 space-y-3 border-l-2 border-emerald-400 pl-4">
         <div className="flex items-center justify-between gap-3"><h3 className="text-sm font-bold">审批时的历史快照</h3><button className="text-xs text-[#9fb0ff]" onClick={() => setSnapshots(current => { const next={...current}; delete next[row.id]; return next; })}>隐藏快照</button></div>
         <p className="text-xs text-emerald-300">采集时间：{time(snapshots[row.id].captured_at)}</p>
-        <div className="max-h-[520px] overflow-auto">{snapshots[row.id].snapshot.values ? snapshots[row.id].snapshot.values!.map(item => <div key={item.line_number} className="border-b border-white/10 py-3"><p className="mb-2 break-all text-xs text-[#c9d2f0]">页面第 {item.line_number} 行 · {item.config_path} · 原文 {item.source_line}-{item.source_end_line} 行</p><pre className="whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{item.value === "" ? "（空字符串）" : item.value}</pre></div>) : <pre className="whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{snapshots[row.id].snapshot.value === "" ? "（空字符串）" : snapshots[row.id].snapshot.value}</pre>}</div>
+        {snapshots[row.id].snapshot.configuration ? <NacosSnapshot configuration={snapshots[row.id].snapshot.configuration!} /> : <div className="max-h-[520px] overflow-auto">{snapshots[row.id].snapshot.values ? snapshots[row.id].snapshot.values!.map(item => <div key={item.line_number} className="border-b border-white/10 py-3"><p className="mb-2 break-all text-xs text-[#c9d2f0]">页面第 {item.line_number} 行 · {item.config_path} · 原文 {item.source_line}-{item.source_end_line} 行</p><pre className="whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{item.value === "" ? "（空字符串）" : item.value}</pre></div>) : <pre className="whitespace-pre-wrap break-words bg-[#04050b] p-4 font-mono text-sm leading-7 [overflow-wrap:anywhere]">{snapshots[row.id].snapshot.value === "" ? "（空字符串）" : snapshots[row.id].snapshot.value}</pre>}</div>}
       </div> : null}
     </article></td></tr> : null}</Fragment>)}</tbody></table></div>
     <div className="flex items-center justify-end gap-3 text-sm"><span>第 {page} 页</span><button className={control} disabled={page <= 1} onClick={() => { clearSnapshots(); setRows([]); setLoading(true); setPage(page-1); }}>上一页</button><button className={control} disabled={page * 20 >= total} onClick={() => { clearSnapshots(); setRows([]); setLoading(true); setPage(page+1); }}>下一页</button></div>
