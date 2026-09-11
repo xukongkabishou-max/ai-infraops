@@ -45,6 +45,9 @@ export function DatabaseAccounts({accessToken,apiBaseUrl}:{accessToken:string;ap
   const [password,setPassword]=useState("");
   const [limited,setLimited]=useState(false);
   const [days,setDays]=useState(30);
+  const [access,setAccess]=useState("read");
+  const [permissionMode,setPermissionMode]=useState<"all"|"specific">("all");
+  const [allowDdl,setAllowDdl]=useState(false);
   const [tables,setTables]=useState<TableGrant[]>([]);
   const [record,setRecord]=useState<Account|null>(null);
   const [recordPassword,setRecordPassword]=useState("");
@@ -83,13 +86,13 @@ export function DatabaseAccounts({accessToken,apiBaseUrl}:{accessToken:string;ap
   }
   async function openCreate(account:Account|null) {
     formOperation.current=operationId();
-    setSource(account);setUsername("");setHost(account?.host||"%");setManual(false);setPassword("");setLimited(false);setDays(30);setTables([]);setFormError("");setFormActive(true);dialog.current?.showModal();
+    setSource(account);setUsername("");setHost(account?.host||"%");setManual(false);setPassword("");setLimited(false);setDays(30);setTables([]);setAccess("read");setPermissionMode(account?"specific":"all");setAllowDdl(false);setFormError("");setFormActive(true);dialog.current?.showModal();
   }
   async function create(event:FormEvent){
     event.preventDefault();if(busy)return;setBusy(true);setFormError("");
     const opId=formOperation.current;setLastOperation(opId);sessionStorage.setItem("infraops:database-operation",opId);setOperation(null);
     try{
-      const result=await api<Operation>(`/${instanceId}/accounts`,"POST",{operation_id:opId,username,host,source_identity:source?.user_identity??null,tables:source?[]:tables,password:manual?password:null,expires_days:limited?days:null});
+      const result=await api<Operation>(`/${instanceId}/accounts`,"POST",{operation_id:opId,username,host,source_identity:source?.user_identity??null,tables:permissionMode==="specific"&&!source?tables:[],permission_mode:source?"specific":permissionMode,access,allow_ddl:allowDdl,password:manual?password:null,expires_days:limited?days:null});
       setOperation(result);
       if(!result.created){setFormError(`操作状态：${states[result.status]??result.status}，可按操作编号继续查询`);return;}
       dialog.current?.close();setCreated({user_identity:result.user_identity,password:result.password??""});setNotice(`已核验 ${result.user_identity} 的账号、权限及密码记录`);await load(1);
@@ -127,8 +130,9 @@ export function DatabaseAccounts({accessToken,apiBaseUrl}:{accessToken:string;ap
       <div className="grid gap-4 sm:grid-cols-2"><label className="text-sm">新账号名称 *<input required pattern="[A-Za-z][A-Za-z0-9_]{1,31}" maxLength={32} className={field} value={username} onChange={event=>setUsername(event.target.value)} placeholder="例如 app_reader" /></label><label className="text-sm">允许连接的 Host<input required maxLength={60} className={field} value={host} onChange={event=>setHost(event.target.value)} /></label></div>
       <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={manual} onChange={event=>setManual(event.target.checked)} />管理员指定密码</label>{manual?<label className="block text-sm">密码 *<input type="text" autoComplete="off" required minLength={8} maxLength={128} className={field} value={password} onChange={event=>setPassword(event.target.value)} /></label>:<p className="text-sm text-[#aab7d1]">自动生成 8 位随机密码，包含大小写字母、数字及符号</p>}
       <div className="flex flex-wrap items-center gap-4"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={limited} onChange={event=>setLimited(event.target.checked)} />设置到期时间</label>{limited?<label className="flex items-center gap-2 text-sm"><input className={control+" w-24"} type="number" required min={1} max={3650} value={days} onChange={event=>setDays(Number(event.target.value))} />天后到期</label>:<span className="text-sm text-[#aab7d1]">永久</span>}</div>
-      {!source&&formActive?<PermissionSelector instanceId={instanceId} api={api} value={tables} onChange={setTables} disabled={busy} />:null}
-      {formError?<p role="alert" className="text-sm text-red-300">{formError}</p>:null}<div className="flex justify-end gap-3"><button type="button" className={control} disabled={busy} onClick={()=>dialog.current?.close()}>取消</button><button className={control+" bg-[#0a1ae1]"} disabled={busy||(!source&&!tables.length)}>{busy?"创建中...":"确认创建"}</button></div>
+      {!source&&formActive?<><div className="space-y-3 border-y border-white/10 py-3"><p className="text-sm font-bold">初始权限范围</p><label className="flex items-center gap-2 text-sm"><input type="radio" name="permission-mode" checked={permissionMode==="all"} onChange={()=>{setPermissionMode("all");setTables([]);}} />默认对所有库表授权</label>{permissionMode==="all"?<div className="flex flex-wrap gap-4 pl-6 text-sm"><label className="flex items-center gap-2"><input type="radio" name="all-access" checked={access==="read"} onChange={()=>setAccess("read")} />所有库表只读</label><label className="flex items-center gap-2"><input type="radio" name="all-access" checked={access==="write"} onChange={()=>setAccess("write")} />所有库表读写</label></div>:null}<label className="flex items-center gap-2 text-sm"><input type="radio" name="permission-mode" checked={permissionMode==="specific"} onChange={()=>setPermissionMode("specific")} />特殊库表权限</label></div>{permissionMode==="specific"?<PermissionSelector instanceId={instanceId} api={api} value={tables} onChange={setTables} disabled={busy}/>:<p className="text-xs leading-5 text-[#aab7d1]">当前将授权所有库表，包含以后新增的库表；选择特殊库表权限后再逐项配置。</p>}</>:null}
+      <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={allowDdl} onChange={event=>setAllowDdl(event.target.checked)} /><span>默认拥有创建库表及临时表权限<span className="mt-1 block text-xs font-normal text-[#aab7d1]">MySQL 增加 CREATE、ALTER、DROP 和 CREATE TEMPORARY TABLES；Doris 使用对应的 CREATE_PRIV、ALTER_PRIV、DROP_PRIV。</span></span></label>
+      {formError?<p role="alert" className="text-sm text-red-300">{formError}</p>:null}<div className="flex justify-end gap-3"><button type="button" className={control} disabled={busy} onClick={()=>dialog.current?.close()}>取消</button><button className={control+" bg-[#0a1ae1]"} disabled={busy||(!source&&permissionMode==="specific"&&!tables.length)}>{busy?"创建中...":"确认创建"}</button></div>
     </form></dialog>
     <dialog ref={passwordDialog} onCancel={event=>{if(busy)event.preventDefault();}} className="m-auto w-[min(500px,calc(100vw-32px))] rounded-[6px] border border-[#4b5fc6] bg-[#070b1b] p-5 text-white backdrop:bg-black/70"><form onSubmit={saveRecord} className="space-y-4"><h3 className="text-lg font-bold">登记已有密码</h3><p className="break-all text-sm">{record?.user_identity}</p><label className="block text-sm">最后配置的密码<input type="text" autoComplete="off" required maxLength={256} className={field} value={recordPassword} onChange={event=>setRecordPassword(event.target.value)} /></label><p className="text-xs text-[#aab7d1]">仅保存管理记录，不修改数据库中的密码</p>{formError?<p role="alert" className="text-sm text-red-300">{formError}</p>:null}<div className="flex justify-end gap-3"><button type="button" className={control} disabled={busy} onClick={()=>passwordDialog.current?.close()}>取消</button><button className={control+" bg-[#0a1ae1]"} disabled={busy}>{busy?"保存中...":"保存记录"}</button></div></form></dialog>
   </section>;

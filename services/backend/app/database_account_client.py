@@ -244,7 +244,7 @@ def verify_grants(connection, kind, destination, expected):
         raise AccountError('账号权限回查与目标不一致，不能确认创建成功')
 
 
-def table_plan(connection, kind, selected, mode, destination):
+def table_plan(connection, kind, selected, mode, destination, allow_ddl=False):
     available = {}
     statements = []
     choices = {}
@@ -277,7 +277,22 @@ def table_plan(connection, kind, selected, mode, destination):
             scope_database = database.replace('\\','\\\\').replace('_',r'\_').replace('%',r'\%')
         obj = ('`internal`.' if kind == 'doris' else '') + identifier(scope_database) + '.' + (identifier(table) if table is not None else '*')
         statements.append(f'GRANT {privileges} ON {obj} TO {destination}')
+    if allow_ddl:
+        ddl = 'CREATE,ALTER,DROP,CREATE TEMPORARY TABLES' if kind=='mysql' else 'CREATE_PRIV,ALTER_PRIV,DROP_PRIV'
+        for database in sorted({item.database for item in selected}):
+            if database in SYSTEM_DATABASES or database not in databases(connection):
+                raise AccountError('所选数据库不存在或属于系统库')
+            scope=('`internal`.' if kind=='doris' else '')+identifier(database)+'.*'
+            statements.append(f'GRANT {ddl} ON {scope} TO {destination}')
     return statements
+
+
+def global_plan(kind, mode, destination, allow_ddl=False):
+    if mode not in ('read','write'):
+        raise AccountError('全库权限类型无效')
+    privileges = ('SELECT' if mode=='read' else 'SELECT,INSERT,UPDATE,DELETE') if kind=='mysql' else ('SELECT_PRIV' if mode=='read' else 'SELECT_PRIV,LOAD_PRIV')
+    if allow_ddl: privileges += ',CREATE,ALTER,DROP,CREATE TEMPORARY TABLES' if kind=='mysql' else ',CREATE_PRIV,ALTER_PRIV,DROP_PRIV'
+    return [f'GRANT {privileges} ON {"*.*" if kind=="mysql" else "*.*.*"} TO {destination}']
 
 
 def verify_managed_account(connection, kind, user_identity, record_id):

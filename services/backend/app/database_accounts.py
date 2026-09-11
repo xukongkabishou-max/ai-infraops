@@ -89,11 +89,13 @@ class CreateAccount(BaseModel):
     password: SecretStr | None = None
     tables: list[TableGrant] = Field(default_factory=list, max_length=200)
     access: Literal['read','write'] = 'read'
+    permission_mode: Literal['all','specific'] = 'specific'
+    allow_ddl: bool = False
     expires_days: int | None = Field(default=None, ge=1, le=3650, strict=True)
 
     @model_validator(mode='after')
     def validate_creation(self):
-        if bool(self.source_identity) == bool(self.tables):
+        if bool(self.source_identity) == bool(self.tables) and not (not self.source_identity and self.permission_mode=='all' and not self.tables):
             raise ValueError('请选择权限克隆或勾选库表')
         if self.username.lower() in {'root','admin','mysql','doris'}:
             raise ValueError('不能创建保留账号')
@@ -364,7 +366,7 @@ def build_database_account_router(require_admin):
             if any(row['username'].lower() == payload.username.lower() for row in current):
                 raise HTTPException(409,'同名账号已存在，不能覆盖或克隆到已有账号')
             destination = remote.identity(source,payload.username,payload.host)
-            plans = remote.clone_plan(source,kind,payload.source_identity,destination) if payload.source_identity else remote.table_plan(source,kind,payload.tables,payload.access,destination)
+            plans = remote.clone_plan(source,kind,payload.source_identity,destination) if payload.source_identity else (remote.global_plan(kind,payload.access,destination,payload.allow_ddl) if payload.permission_mode=='all' else remote.table_plan(source,kind,payload.tables,payload.access,destination,payload.allow_ddl))
             cipher,nonce = _encrypt_password(password,aad(instance_id,destination))
             existing = execute_query('SELECT id FROM database_managed_accounts WHERE instance_fingerprint=%s AND user_identity=%s',(remote.fingerprint(instance),destination))
             if existing:
