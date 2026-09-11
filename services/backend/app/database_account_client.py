@@ -256,7 +256,8 @@ def table_plan(connection, kind, selected, mode, destination, allow_ddl=False):
             raise AccountError('同一库表不能同时指定两种权限')
         choices[key] = access
     for (database, table), access in sorted(choices.items(), key=lambda item:(item[0][0],item[0][1] or '')):
-        privileges = ('SELECT' if access == 'read' else 'SELECT,INSERT,UPDATE,DELETE') if kind == 'mysql' else ('SELECT_PRIV' if access == 'read' else 'SELECT_PRIV,LOAD_PRIV')
+        effective_access = 'write' if allow_ddl else access
+        privileges = ('SELECT' if effective_access == 'read' else 'SELECT,INSERT,UPDATE,DELETE') if kind == 'mysql' else ('SELECT_PRIV' if effective_access == 'read' else 'SELECT_PRIV,LOAD_PRIV')
         if table is None:
             if database in SYSTEM_DATABASES or database not in databases(connection):
                 raise AccountError('所选数据库不存在或属于系统库')
@@ -290,7 +291,7 @@ def table_plan(connection, kind, selected, mode, destination, allow_ddl=False):
 def global_plan(kind, mode, destination, allow_ddl=False):
     if mode not in ('read','write'):
         raise AccountError('全库权限类型无效')
-    privileges = ('SELECT' if mode=='read' else 'SELECT,INSERT,UPDATE,DELETE') if kind=='mysql' else ('SELECT_PRIV' if mode=='read' else 'SELECT_PRIV,LOAD_PRIV')
+    privileges = ('SELECT,INSERT,UPDATE,DELETE' if allow_ddl or mode=='write' else 'SELECT') if kind=='mysql' else ('SELECT_PRIV,LOAD_PRIV' if allow_ddl or mode=='write' else 'SELECT_PRIV')
     if allow_ddl: privileges += ',CREATE,ALTER,DROP,CREATE TEMPORARY TABLES' if kind=='mysql' else ',CREATE_PRIV,ALTER_PRIV,DROP_PRIV'
     return [f'GRANT {privileges} ON {"*.*" if kind=="mysql" else "*.*.*"} TO {destination}']
 

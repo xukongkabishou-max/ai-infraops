@@ -44,7 +44,7 @@ def main():
                     remote.query(connection,'CREATE ROLE '+remote.identifier(role));role_created=True
                 for mode in ['read','clone','write','multi_read','multi_write','ddl']:
                     username='qa_'+suffix+'_'+mode
-                    writable='write' in mode
+                    writable='write' in mode or mode=='ddl'
                     selected=[schema,schema_two] if mode.startswith('multi') else [schema]
                     payload={'username':username,'tables':[{'database':database,'table':'allowed'} for database in selected],
                         'access':'write' if writable else 'read','allow_ddl':mode=='ddl','expires_days':None if mode=='read' else 1}

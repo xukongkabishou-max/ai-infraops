@@ -229,12 +229,13 @@ def test_external_connections_are_reused_and_capacity_is_bounded(monkeypatch):
 
 
 def test_global_and_specific_ddl_plans_include_mysql_temporary_tables(monkeypatch):
-    assert remote.global_plan('mysql','read',"'u'@'%'",True)==["GRANT SELECT,CREATE,ALTER,DROP,CREATE TEMPORARY TABLES ON *.* TO 'u'@'%'"]
+    assert remote.global_plan('mysql','read',"'u'@'%'",True)==["GRANT SELECT,INSERT,UPDATE,DELETE,CREATE,ALTER,DROP,CREATE TEMPORARY TABLES ON *.* TO 'u'@'%'"]
     monkeypatch.setattr(remote,'databases',lambda *args:['app'])
     monkeypatch.setattr(remote,'tables',lambda *args:['one'])
     monkeypatch.setattr(remote,'query',lambda *args:[{'enabled':0}])
     plan=remote.table_plan(None,'mysql',[management.TableGrant(database='app',table='one',access='read')],'read',"'u'@'%'",True)
     assert any('CREATE TEMPORARY TABLES' in statement and 'ON `app`.*' in statement for statement in plan)
+    assert any('INSERT' in statement and 'UPDATE' in statement and 'DELETE' in statement and 'ON `app`.`one`' in statement for statement in plan)
 
 
 def test_password_record_does_not_override_native_expiry(api,monkeypatch):
