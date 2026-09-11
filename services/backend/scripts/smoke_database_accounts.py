@@ -42,12 +42,12 @@ def main():
                             if kind=='doris':sql+=' UNIQUE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 PROPERTIES("replication_num"="1","enable_unique_key_merge_on_write"="true")'
                             remote.query(connection,sql)
                     remote.query(connection,'CREATE ROLE '+remote.identifier(role));role_created=True
-                for mode in ['read','clone','write','multi_read','multi_write']:
+                for mode in ['read','clone','write','multi_read','multi_write','ddl']:
                     username='qa_'+suffix+'_'+mode
                     writable='write' in mode
                     selected=[schema,schema_two] if mode.startswith('multi') else [schema]
                     payload={'username':username,'tables':[{'database':database,'table':'allowed'} for database in selected],
-                        'access':'write' if writable else 'read','expires_days':None if mode=='read' else 1}
+                        'access':'write' if writable else 'read','allow_ddl':mode=='ddl','expires_days':None if mode=='read' else 1}
                     if mode=='clone':payload={'username':username,'source_identity':source_identity,'expires_days':1}
                     payload['operation_id']=str(uuid4())
                     if mode=='write':payload['password']="Qa!7%_zX"
@@ -84,6 +84,13 @@ def main():
                                 if writable:
                                     cursor.execute(f"UPDATE {remote.identifier(database)}.`allowed` SET content='updated' WHERE id=1")
                                     cursor.execute(f'DELETE FROM {remote.identifier(database)}.`allowed` WHERE id=1')
+                            if mode=='ddl':
+                                table_name='created_'+suffix
+                                cursor.execute(f'CREATE TABLE {remote.identifier(schema)}.{remote.identifier(table_name)} (id INT)')
+                                cursor.execute(f'DROP TABLE {remote.identifier(schema)}.{remote.identifier(table_name)}')
+                                if kind=='mysql':
+                                    cursor.execute(f'CREATE TEMPORARY TABLE {remote.identifier(schema)}.`temporary_fixture` (id INT)')
+                                    cursor.execute(f'DROP TEMPORARY TABLE {remote.identifier(schema)}.`temporary_fixture`')
                     finally:connection.close()
                     listing=client.get(base+'/accounts',params={'keyword':username}).json()
                     assert listing['items'][0]['password']==data['password']
