@@ -2181,10 +2181,12 @@ def get_k8s_namespaces(
 @app.get("/api/k8s/images")
 def get_k8s_images(
     host_id: int,
+    response: Response,
     namespace: str = Query(min_length=1, max_length=253),
     user_session: dict = Depends(require_user_web_session),
 ) -> dict:
     require_permission(user_session, "k8s:image:list")
+    response.headers['Cache-Control']='no-store, private'
     cluster = get_k8s_cluster_by_host(host_id, include_credentials=True)
     cluster_id = cluster["id"]
     try:

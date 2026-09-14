@@ -2,6 +2,7 @@
 
 import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { UserValueRequests, ValueRequestButton, type NacosLine } from "./value-requests";
+import { WorkloadImages, type ControllerImage } from "./workload-images";
 
 type UserWebSession = {
   access_token: string;
@@ -126,14 +127,6 @@ type K8sHostOption = {
   last_error?: string | null;
 };
 
-type ControllerImage = {
-  controller_type: "Deployment" | "StatefulSet" | "DaemonSet";
-  controller_name: string;
-  pod_name: string;
-  ready_replicas: number;
-  desired_replicas: number;
-  containers: Array<{ name: string; image: string }>;
-};
 
 type EnvK8sHostOption = K8sHostOption & {
   namespace_keys: string[];
@@ -2262,6 +2255,10 @@ function ImageInventoryView() {
   const [namespaces, setNamespaces] = useState<string[]>([]);
   const [namespace, setNamespace] = useState("");
   const [images, setImages] = useState<ControllerImage[]>([]);
+  const [imagesObservedAt,setImagesObservedAt]=useState(0);
+  const imageQueryGeneration=useRef(0);
+  const imageQueryController=useRef<AbortController|null>(null);
+  useEffect(()=>{const generation=imageQueryGeneration;const controller=imageQueryController;return ()=>{generation.current++;controller.current?.abort();};},[]);
   const [loading, setLoading] = useState(true);
   const [loadingNamespaces, setLoadingNamespaces] = useState(false);
   const [querying, setQuerying] = useState(false);
@@ -2310,30 +2307,37 @@ function ImageInventoryView() {
     if (!hostId || !namespace) {
       return;
     }
+    imageQueryController.current?.abort();
+    const controller=new AbortController();imageQueryController.current=controller;
+    const generation=++imageQueryGeneration.current;
     setQuerying(true);
     setHasQueried(false);
     setError("");
     try {
       const data = await fetchUserApi<{ images: ControllerImage[] }>(
         `/api/k8s/images?host_id=${hostId}&namespace=${encodeURIComponent(namespace)}`,
+        controller.signal,
       );
+      if(controller.signal.aborted||generation!==imageQueryGeneration.current)return;
       setImages(data.images);
+      setImagesObservedAt(Date.now());
       setHasQueried(true);
     } catch (queryError) {
-      setError(queryError instanceof Error ? queryError.message : "运行中镜像查询失败");
+      if(!controller.signal.aborted&&generation===imageQueryGeneration.current)setError(queryError instanceof Error ? queryError.message : "Pod 与镜像查询失败");
     } finally {
-      setQuerying(false);
+      if(generation===imageQueryGeneration.current)setQuerying(false);
     }
   }
 
   const selectedHost = hosts.find((item) => String(item.host_id) === hostId);
 
   return (
-    <SectionBlock title="镜像管理" description="选择已配置 K8S 凭证的环境主机和 namespace，再手动查询当前处于 Running 状态的 Pod 容器镜像。">
+    <SectionBlock title="镜像与 Pod 状态" description="按控制器查看期望副本、正常与异常 Pod、新旧版本镜像及重启情况。" action={<button type="button" className="h-10 shrink-0 rounded-[6px] border border-[#4b5fc6] px-4 text-sm text-[#c9d2f0] disabled:opacity-40" disabled={!hostId||!namespace||loadingNamespaces||querying} onClick={queryImages}>{querying?"刷新中...":"刷新状态"}</button>}>
       <div className="grid gap-4 rounded-[6px] border border-white/10 bg-[#070b1b] p-4 md:grid-cols-2 xl:grid-cols-[1.2fr_1fr_auto]">
         <label className="block">
           <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">环境 / 机器</span>
           <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none" disabled={hosts.length === 0} onChange={(event) => {
+            imageQueryGeneration.current++;imageQueryController.current?.abort();setQuerying(false);
             setLoadingNamespaces(true);
             setError("");
             setNamespaces([]);
@@ -2349,6 +2353,7 @@ function ImageInventoryView() {
         <label className="block">
           <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/56">Namespace</span>
           <select className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#04050b] px-3 text-sm text-white outline-none" disabled={loadingNamespaces || namespaces.length === 0} onChange={(event) => {
+            imageQueryGeneration.current++;imageQueryController.current?.abort();setQuerying(false);
             setError("");
             setImages([]);
             setHasQueried(false);
@@ -2360,7 +2365,7 @@ function ImageInventoryView() {
           </select>
         </label>
         <button className="h-11 self-end rounded-[6px] bg-[#0a1ae1] px-5 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={!namespace || querying || loadingNamespaces} onClick={queryImages} type="button">
-          {querying ? "正在获取..." : "获取当前正在运行的镜像"}
+          {querying ? "正在获取..." : "获取 Pod 状态与镜像"}
         </button>
       </div>
 
@@ -2374,30 +2379,7 @@ function ImageInventoryView() {
       {loading ? <p className="mt-5 rounded-[6px] border border-white/10 bg-[#070b1b] px-4 py-8 text-center text-sm text-[#bfc9e7]/64">正在加载已配置 K8S 凭证的主机...</p> : null}
       {!loading && !error && hosts.length === 0 ? <p className="mt-5 rounded-[6px] border border-dashed border-white/14 px-4 py-8 text-center text-sm text-[#bfc9e7]/64">请先在后台管理页面为主机保存 K8S 凭证内容。</p> : null}
 
-      {hasQueried && namespace && !error ? (
-        <div className="mt-5 overflow-x-auto">
-          <table className="w-full min-w-[1120px] text-left text-sm">
-            <thead className="text-xs text-[#bfc9e7]/52"><tr className="border-b border-white/10"><th className="w-32 py-3 pr-5">控制器类型</th><th className="w-[19%] py-3 pr-5">控制器名称</th><th className="w-[24%] py-3 pr-5">Pod 名称</th><th className="w-32 py-3 pr-5">副本数（就绪/期望）</th><th className="w-[14%] py-3 pr-5">容器名</th><th className="py-3 pr-4">容器完整镜像</th></tr></thead>
-            <tbody>
-              {images.map((image) => (
-                <tr className="border-b border-white/8 align-top text-[#bfc9e7]/78" key={`${image.controller_type}-${image.pod_name}`}>
-                  <td className="py-4 pr-5 font-bold text-white">{image.controller_type}</td>
-                  <td className="break-all py-4 pr-5 font-mono text-xs font-bold text-[#9fb0ff]">{image.controller_name}</td>
-                  <td className="break-all py-4 pr-5 font-mono text-xs leading-6">{image.pod_name}</td>
-                  <td className="py-4 pr-5 text-base font-black text-white">{image.ready_replicas}/{image.desired_replicas}</td>
-                  <td className="py-4 pr-5 font-mono text-xs leading-6">
-                    {image.containers.map((container) => <div key={`${container.name}-${container.image}`}>{container.name}</div>)}
-                  </td>
-                  <td className="py-4 pr-4 font-mono text-xs leading-6">
-                    {image.containers.map((container) => <div className="break-all" key={`${container.name}-${container.image}`}>{container.image}</div>)}
-                  </td>
-                </tr>
-              ))}
-              {images.length === 0 ? <tr><td className="py-10 text-center text-[#bfc9e7]/52" colSpan={6}>该 namespace 当前没有 Deployment、StatefulSet 或 DaemonSet 的 Running Pod</td></tr> : null}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
+      {hasQueried && namespace && !error ? <WorkloadImages images={images} observedAt={imagesObservedAt} /> : null}
     </SectionBlock>
   );
 }
@@ -2944,16 +2926,19 @@ function SectionBlock({
   children,
   description,
   title,
+  action,
 }: {
   children: React.ReactNode;
   description?: string;
   title: string;
+  action?: React.ReactNode;
 }) {
   return (
     <section className="rounded-[8px] border border-white/10 bg-[#04050b]/52 p-5 shadow-2xl backdrop-blur">
-      <div className="mb-5">
-        <h2 className="text-lg font-black text-white">{title}</h2>
-        {description ? <p className="mt-2 text-sm leading-6 text-[#bfc9e7]/64">{description}</p> : null}
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0"><h2 className="text-lg font-black text-white">{title}</h2>
+        {description ? <p className="mt-2 text-sm leading-6 text-[#bfc9e7]/64">{description}</p> : null}</div>
+        {action}
       </div>
       {children}
     </section>
