@@ -113,7 +113,10 @@ def connect(instance, config, db_index=0):
     now = datetime.now(timezone.utc).timestamp()
     with _pool_lock:
         for key in [key for key, (_, used) in _pools.items() if now - used > 600]:
-            _pools[key][0].disconnect()
+            client = _pools[key][0]
+            close = getattr(client, "close", None)
+            if callable(close):
+                client.close()
             del _pools[key]
         if pool_key not in _pools:
             timeout = int(config.get("connect_timeout_ms", 4000)) / 1000
@@ -392,7 +395,7 @@ def build_redis_data_router(require_user_web_session):
         """)
         for row in rows:
             raw = row.get("bootstrap_endpoints_json", "[]")
-            row["endpoints"] = json.loads(raw) if isinstance(raw, str) else raw
+            row["endpoints"] = parse_endpoints(raw)
             raw = row.get("topology_json") or "{}"
             row["topology"] = json.loads(raw) if isinstance(raw, str) else raw
             row["databases"] = ([0] if row["deployment_mode"] == "cluster"
