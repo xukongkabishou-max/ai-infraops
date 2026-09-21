@@ -94,7 +94,7 @@ export function RedisBrowser({ apiBaseUrl }: { apiBaseUrl: string }) {
       const nextItems = data.items.slice(0, remaining);
       setKeys([...base, ...nextItems]);
       setLimitReached(base.length + nextItems.length >= MAX_RESULT_KEYS);
-      setCursor(data.cursor); setCompleted(data.completed);
+      setCursor(data.cursor);
     } catch (error) { if (current === generation.current) setError(error instanceof Error ? error.message : "查询失败"); }
     finally { if (current === generation.current) setLoading(false); }
   }

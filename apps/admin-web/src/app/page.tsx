@@ -35,8 +35,8 @@ type MonitoringPlatformOption = {
 
 type SectionKey = "machine" | "business" | "middleware" | "monitoring";
 type MachinePageKey = "environmentApis" | "machineAccounts" | "middlewareAccounts";
-type BusinessPageKey = "nodePorts" | "imageTags" | "gpuModels" | "envKeys" | "redisData" | "approvals";
-type MiddlewarePageKey = "nacosKeys" | "healthChecks" | "approvals";
+type BusinessPageKey = "nodePorts" | "imageTags" | "gpuModels" | "envKeys" | "approvals";
+type MiddlewarePageKey = "nacosKeys" | "redisData" | "healthChecks" | "approvals";
 
 type ResourceHostOption = {
   host_id: number;
@@ -267,7 +267,7 @@ const navigationItems: Array<{
 }> = [
   { key: "machine", label: "机器信息管理", hint: "主机、日志、K8S 事件、账号", menuCode: "portal.machine", permission: "page:machine:view" },
   { key: "business", label: "业务系统管理", hint: "NodePort、镜像、模型、环境变量", menuCode: "portal.business", permission: "page:business:view" },
-  { key: "middleware", label: "中间件系统管理", hint: "Nacos、数据库可用性", menuCode: "portal.middleware", permission: "page:middleware:view" },
+  { key: "middleware", label: "中间件系统管理", hint: "Nacos、Redis、数据库可用性", menuCode: "portal.middleware", permission: "page:middleware:view" },
   { key: "monitoring", label: "监控系统集成", hint: "待定能力预留", menuCode: "portal.monitoring", permission: "page:monitoring:view" },
 ];
 
@@ -296,10 +296,10 @@ const sectionMeta: Record<
   },
   middleware: {
     eyebrow: "中间件系统管理",
-    title: "配置目录与核心中间件可用性校验",
+    title: "Nacos、Redis 与核心中间件可用性",
     summary:
-      "展示 Nacos 的 Namespace、Group、配置名称与格式，并为 MySQL、Doris、Redis、Kafka 等核心组件预留快速可用性校验入口。",
-    implementation: "Nacos 目录通过官方元数据接口获取；用户点选单个 YAML/JSON 配置后，正文仅在服务端内存中解析并清空 value。数据库可用性后续通过脚本模拟读写、生产消费和删除流程。",
+      "展示 Nacos 的 Namespace、Group、配置名称与格式；支持 Redis key 查询、基础 CRUD、文件导入，并为 MySQL、Doris、Redis、Kafka 等核心组件预留可用性校验入口。",
+    implementation: "Nacos 目录通过官方元数据接口获取；Redis 数据通过后端受控 Redis 客户端查询和写入，cluster 拓扑自动发现，SCAN 和值预览均有上限。数据库可用性后续通过脚本模拟读写、生产消费和删除流程。",
   },
   monitoring: {
     eyebrow: "监控系统集成",
@@ -1737,7 +1737,6 @@ function BusinessSystemView({
     { key: "imageTags", label: "镜像管理", hint: "按环境和 namespace 查看镜像" },
     { key: "gpuModels", label: "GPU 模型显存", hint: "模型、显存与空闲卡" },
     { key: "envKeys", label: "环境变量 key", hint: "只展示 key，不展示 value" },
-    { key: "redisData", label: "Redis 数据", hint: "基础 CRUD 与文件导入" },
   ];
 
   return (
@@ -1764,7 +1763,6 @@ function BusinessSystemView({
       {activePage === "envKeys" ? (
         <EnvironmentKeyInventoryView />
       ) : null}
-      {activePage === "redisData" ? <RedisBrowser apiBaseUrl={apiBaseUrl} /> : null}
       {activePage === "approvals" ? <UserValueRequests category="environment" read={fetchUserApi} /> : null}
     </div>
   );
@@ -2597,6 +2595,7 @@ function MiddlewareSystemView({
 
   const pages: Array<{ key: MiddlewarePageKey; label: string; hint: string }> = [
     { key: "nacosKeys", label: "Nacos 配置目录", hint: "Namespace、Group 与配置名称" },
+    { key: "redisData", label: "Redis 数据", hint: "基础 CRUD 与文件导入" },
     { key: "healthChecks", label: "数据库可用性校验", hint: "MySQL、Doris、Redis、Kafka" },
   ];
   const selectedNamespace = nacosCatalog?.namespaces.find(
@@ -2815,6 +2814,7 @@ function MiddlewareSystemView({
       ) : null}
 
       {activePage === "approvals" ? <UserValueRequests category="nacos" read={fetchUserApi} /> : null}
+      {activePage === "redisData" ? <RedisBrowser apiBaseUrl={apiBaseUrl} /> : null}
       {activePage === "healthChecks" ? (
         <SectionBlock title="核心数据库可用性快速校验" description="可用性脚本仍为预留功能；MySQL 支持跳转后台登记的 Grafana 仪表盘。">
         <div className="grid gap-4 lg:grid-cols-2">
