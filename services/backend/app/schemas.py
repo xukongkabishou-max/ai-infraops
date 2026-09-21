@@ -74,12 +74,16 @@ class K8sClusterCreateRequest(BaseModel):
 
 
 class MiddlewareInstanceBaseRequest(BaseModel):
-    middleware_type: Literal["nacos", "doris", "mysql"] = "nacos"
+    middleware_type: Literal["nacos", "doris", "mysql", "redis"] = "nacos"
     environment_name: str = Field(min_length=1, max_length=128)
     instance_name: str = Field(default="", max_length=128)
     base_url: str = Field(min_length=1, max_length=512)
     dashboard_url: str = Field(default="", max_length=2048)
     username: str = Field(min_length=1, max_length=255)
+    redis_deployment_mode: Literal["standalone", "cluster"] = "standalone"
+    redis_database_count: int = Field(default=16, ge=1, le=64)
+    redis_tls_enabled: bool = False
+    redis_verify_tls: bool = True
 
     @field_validator(
         "environment_name", "instance_name", "dashboard_url", "username"
@@ -98,6 +102,21 @@ class MiddlewareInstanceBaseRequest(BaseModel):
             self.dashboard_url = ""
         elif self.middleware_type == "doris":
             self.base_url = _normalize_doris_address(self.base_url)
+            self.dashboard_url = ""
+        elif self.middleware_type == "redis":
+            endpoints = [part.strip() for part in self.base_url.split(",") if part.strip()]
+            normalized = []
+            for endpoint in endpoints:
+                parsed = endpoint.replace("redis://", "", 1).rstrip("/")
+                if not parsed or ":" not in parsed:
+                    raise ValueError("Redis endpoint 必须是 host:port")
+                host, port = parsed.rsplit(":", 1)
+                if not host or not port.isdigit():
+                    raise ValueError("Redis endpoint 必须是 host:port")
+                normalized.append(f"redis://{host}:{int(port)}")
+            if not normalized:
+                raise ValueError("Redis 实例至少需要一个 endpoint")
+            self.base_url = ",".join(normalized)
             self.dashboard_url = ""
         else:
             self.base_url = _normalize_mysql_address(self.base_url)

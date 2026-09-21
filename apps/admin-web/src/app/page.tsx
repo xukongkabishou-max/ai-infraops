@@ -3,6 +3,7 @@
 import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { UserValueRequests, ValueRequestButton, type NacosLine } from "./value-requests";
 import { WorkloadImages, type ControllerImage } from "./workload-images";
+import { RedisBrowser } from "./redis-browser";
 
 type UserWebSession = {
   access_token: string;
@@ -34,7 +35,7 @@ type MonitoringPlatformOption = {
 
 type SectionKey = "machine" | "business" | "middleware" | "monitoring";
 type MachinePageKey = "environmentApis" | "machineAccounts" | "middlewareAccounts";
-type BusinessPageKey = "nodePorts" | "imageTags" | "gpuModels" | "envKeys" | "approvals";
+type BusinessPageKey = "nodePorts" | "imageTags" | "gpuModels" | "envKeys" | "redisData" | "approvals";
 type MiddlewarePageKey = "nacosKeys" | "healthChecks" | "approvals";
 
 type ResourceHostOption = {
@@ -1736,6 +1737,7 @@ function BusinessSystemView({
     { key: "imageTags", label: "镜像管理", hint: "按环境和 namespace 查看镜像" },
     { key: "gpuModels", label: "GPU 模型显存", hint: "模型、显存与空闲卡" },
     { key: "envKeys", label: "环境变量 key", hint: "只展示 key，不展示 value" },
+    { key: "redisData", label: "Redis 数据", hint: "基础 CRUD 与文件导入" },
   ];
 
   return (
@@ -1762,6 +1764,7 @@ function BusinessSystemView({
       {activePage === "envKeys" ? (
         <EnvironmentKeyInventoryView />
       ) : null}
+      {activePage === "redisData" ? <RedisBrowser apiBaseUrl={apiBaseUrl} /> : null}
       {activePage === "approvals" ? <UserValueRequests category="environment" read={fetchUserApi} /> : null}
     </div>
   );

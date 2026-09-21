@@ -73,6 +73,7 @@ from .nacos_client import (
 )
 from .nacos_config_redactor import NacosConfigParseError
 from .nacos_value_selection import parse_config_document, selection_scope
+from .redis_data import build_redis_data_router, dispose_redis_pools
 from .node_exporter import scrape_node_exporter
 from .schemas import (
     HostCreateRequest,
@@ -110,6 +111,7 @@ async def lifespan(_app):
         expiry_stop.set()
         await expiry_task
         await run_in_threadpool(dispose_account_pools)
+        await run_in_threadpool(dispose_redis_pools)
         await run_in_threadpool(dispose_pools)
 
 
@@ -623,6 +625,7 @@ def update_monitoring_platform(
                     platform_id,
                 ),
             )
+            _upsert_redis_instance_config(cursor, instance_id, payload)
         connection.commit()
     except IntegrityError as exc:
         connection.rollback()
@@ -708,6 +711,57 @@ def get_monitoring_platform(platform_id: int) -> dict:
     return rows[0]
 
 
+def _upsert_redis_instance_config(cursor, instance_id, payload):
+    if payload.middleware_type != "redis":
+        return
+    endpoints = [
+        endpoint.strip().removeprefix("redis://")
+        for endpoint in payload.base_url.split(",")
+        if endpoint.strip()
+    ]
+    bootstrap = json.dumps(endpoints, ensure_ascii=False)
+    cursor.execute(
+        """
+        INSERT INTO redis_instance_configs
+            (middleware_instance_id, deployment_mode, database_count, username,
+             tls_enabled, verify_tls, bootstrap_endpoints_json)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            deployment_mode = VALUES(deployment_mode),
+            database_count = VALUES(database_count),
+            username = VALUES(username),
+            tls_enabled = VALUES(tls_enabled),
+            verify_tls = VALUES(verify_tls),
+            bootstrap_endpoints_json = VALUES(bootstrap_endpoints_json),
+            topology_fingerprint = NULL,
+            topology_checked_at = NULL
+        """,
+        (
+            instance_id,
+            payload.redis_deployment_mode,
+            payload.redis_database_count if payload.redis_deployment_mode == "standalone" else 1,
+            payload.username,
+            payload.redis_tls_enabled,
+            payload.redis_verify_tls,
+            bootstrap,
+        ),
+    )
+    cursor.execute(
+        """
+        INSERT INTO redis_instance_nodes
+            (redis_config_id, host, port, role, is_seed, status)
+        SELECT id, JSON_UNQUOTE(JSON_EXTRACT(node, '$.host')),
+               CAST(JSON_EXTRACT(node, '$.port') AS UNSIGNED), 'seed', 1, 'unknown'
+        FROM redis_instance_configs c
+        JOIN JSON_TABLE(c.bootstrap_endpoints_json, '$[*]' COLUMNS (node JSON PATH '$')) nodes
+        WHERE c.middleware_instance_id = %s
+        ON DUPLICATE KEY UPDATE role = VALUES(role), is_seed = VALUES(is_seed),
+                                status = VALUES(status)
+        """,
+        (instance_id,),
+    )
+
+
 @app.get("/api/middleware/instances")
 def list_middleware_instances(
     middleware_type: str | None = None,
@@ -754,6 +808,7 @@ def create_middleware_instance(
         "nacos": "Nacos",
         "doris": "Doris",
         "mysql": "MySQL",
+        "redis": "Redis",
     }[payload.middleware_type]
     instance_name = payload.instance_name or f"{payload.environment_name} {middleware_label}"
     created_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -808,6 +863,7 @@ def create_middleware_instance(
                 ),
             )
             instance_id = cursor.lastrowid
+            _upsert_redis_instance_config(cursor, instance_id, payload)
         connection.commit()
     except IntegrityError as exc:
         connection.rollback()
@@ -856,6 +912,7 @@ def update_middleware_instance(
         "nacos": "Nacos",
         "doris": "Doris",
         "mysql": "MySQL",
+        "redis": "Redis",
     }[payload.middleware_type]
     instance_name = payload.instance_name or f"{payload.environment_name} {middleware_label}"
     environment_code = (
@@ -3167,3 +3224,4 @@ app.include_router(build_value_access_router(
 app.include_router(build_user_password_router(require_backend_admin_session, password_context))
 app.include_router(build_user_management_router(require_backend_admin_session, password_context))
 app.include_router(build_database_account_router(require_backend_admin_session))
+app.include_router(build_redis_data_router(require_user_web_session))

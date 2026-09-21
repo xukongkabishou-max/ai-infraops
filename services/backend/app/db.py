@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from contextlib import contextmanager
 import os
 from threading import Lock
 
@@ -194,6 +195,7 @@ def execute_queries(statements: list[tuple[str, tuple]]) -> list[list[dict]]:
         connection.close()
 
 
+@contextmanager
 def transaction() -> Iterator:
     connection = get_connection()
     try:

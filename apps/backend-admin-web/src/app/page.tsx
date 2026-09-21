@@ -72,7 +72,7 @@ type HostNotice = {
 type MiddlewareInstance = {
   id: number;
   environment_name: string;
-  middleware_type: "nacos" | "doris" | "mysql";
+  middleware_type: "nacos" | "doris" | "mysql" | "redis";
   instance_name: string;
   base_url: string;
   dashboard_url?: string | null;
@@ -1093,7 +1093,11 @@ const middlewareViews = ["中间件实例", "账号资产", "权限范围", "数
 function MiddlewareResourceManager({ accessToken, canManageDatabaseAccounts }: { accessToken: string; canManageDatabaseAccounts: boolean }) {
   const [activeView, setActiveView] = useState<(typeof middlewareViews)[number]>("中间件实例");
   const [instances, setInstances] = useState<MiddlewareInstance[]>([]);
-  const [middlewareType, setMiddlewareType] = useState<"nacos" | "doris" | "mysql">("nacos");
+  const [middlewareType, setMiddlewareType] = useState<"nacos" | "doris" | "mysql" | "redis">("nacos");
+  const [redisDeploymentMode, setRedisDeploymentMode] = useState<"standalone" | "cluster">("standalone");
+  const [redisDatabaseCount, setRedisDatabaseCount] = useState("16");
+  const [redisTlsEnabled, setRedisTlsEnabled] = useState(false);
+  const [redisVerifyTls, setRedisVerifyTls] = useState(true);
   const [environmentName, setEnvironmentName] = useState("");
   const [instanceName, setInstanceName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -1175,7 +1179,7 @@ function MiddlewareResourceManager({ accessToken, canManageDatabaseAccounts }: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
+      body: JSON.stringify({
           middleware_type: middlewareType,
           environment_name: environmentName,
           instance_name: instanceName,
@@ -1188,6 +1192,12 @@ function MiddlewareResourceManager({ accessToken, canManageDatabaseAccounts }: {
           dashboard_url: middlewareType === "mysql" ? mysqlDashboardUrl : "",
           username,
           password,
+          ...(middlewareType === "redis" ? {
+            redis_deployment_mode: redisDeploymentMode,
+            redis_database_count: Number(redisDatabaseCount),
+            redis_tls_enabled: redisTlsEnabled,
+            redis_verify_tls: redisVerifyTls,
+          } : {}),
         }),
       });
       const data = await response.json().catch(() => ({}));
@@ -1211,7 +1221,8 @@ function MiddlewareResourceManager({ accessToken, canManageDatabaseAccounts }: {
 
   function handleEditInstance(instance: MiddlewareInstance) {
     setEditingInstanceId(instance.id);
-    setMiddlewareType(instance.middleware_type);
+      setMiddlewareType(instance.middleware_type);
+      setRedisDeploymentMode(instance.middleware_type === "redis" ? "standalone" : "standalone");
     setEnvironmentName(instance.environment_name);
     setInstanceName(instance.instance_name);
     setBaseUrl(instance.middleware_type === "nacos" ? instance.base_url : "");
@@ -1231,7 +1242,11 @@ function MiddlewareResourceManager({ accessToken, canManageDatabaseAccounts }: {
     }
     setMysqlDashboardUrl(instance.dashboard_url ?? "");
     setUsername(instance.username);
-    setPassword("");
+      setPassword("");
+      setRedisDeploymentMode("standalone");
+      setRedisDatabaseCount("16");
+      setRedisTlsEnabled(false);
+      setRedisVerifyTls(true);
     setError("");
     setNotice("正在编辑中间件实例；密码留空将保留原凭证。");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1285,7 +1300,7 @@ function MiddlewareResourceManager({ accessToken, canManageDatabaseAccounts }: {
           onSubmit={handleSaveInstance}
         >
           <div className="flex gap-2 md:col-span-2 xl:col-span-4" role="group" aria-label="中间件类型">
-            {(["nacos", "doris", "mysql"] as const).map((type) => (
+            {(["nacos", "doris", "mysql", "redis"] as const).map((type) => (
               <button
                 aria-pressed={middlewareType === type}
                 className={`h-10 min-w-28 rounded-[6px] border px-4 text-sm font-bold transition ${
@@ -1360,6 +1375,50 @@ function MiddlewareResourceManager({ accessToken, canManageDatabaseAccounts }: {
                   type="number"
                   value={dorisPort}
                 />
+            </label>
+            </>
+          ) : middlewareType === "redis" ? (
+            <>
+              <label className="block md:col-span-2">
+                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">Redis Endpoints（集群用英文逗号分隔）</span>
+                <input
+                  className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 font-mono text-sm outline-none focus:border-[#7f91ff]"
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                  placeholder="10.0.0.1:6379,10.0.0.2:6379,10.0.0.3:6379"
+                  required
+                  value={baseUrl}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">部署模式</span>
+                <select
+                  className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+                  onChange={(event) => setRedisDeploymentMode(event.target.value as "standalone" | "cluster")}
+                  value={redisDeploymentMode}
+                >
+                  <option value="standalone">单机 / 主从</option>
+                  <option value="cluster">Cluster</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-xs font-bold text-[#bfc9e7]/60">DB 数量</span>
+                <input
+                  className="h-11 w-full rounded-[6px] border border-[#1b255d] bg-[#070b1b] px-3 text-sm outline-none focus:border-[#7f91ff]"
+                  disabled={redisDeploymentMode === "cluster"}
+                  max={64}
+                  min={1}
+                  onChange={(event) => setRedisDatabaseCount(event.target.value)}
+                  type="number"
+                  value={redisDeploymentMode === "cluster" ? "1" : redisDatabaseCount}
+                />
+              </label>
+              <label className="flex items-end gap-2 pb-3 text-sm">
+                <input checked={redisTlsEnabled} onChange={(event) => setRedisTlsEnabled(event.target.checked)} type="checkbox" />
+                TLS
+              </label>
+              <label className="flex items-end gap-2 pb-3 text-sm">
+                <input checked={redisVerifyTls} onChange={(event) => setRedisVerifyTls(event.target.checked)} type="checkbox" />
+                校验 TLS 证书
               </label>
             </>
           ) : (
@@ -1575,6 +1634,9 @@ function middlewareTypeLabel(type: MiddlewareInstance["middleware_type"]): strin
   }
   if (type === "mysql") {
     return "MySQL";
+  }
+  if (type === "redis") {
+    return "Redis";
   }
   return "Nacos";
 }
